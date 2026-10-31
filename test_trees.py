@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bptree import BPlusTree
 from hashing import H, encode_record, node_hash, record_hash
 from mbtree import MBTree
+from verify import verify_read
 
 # The 16-key toy example (email): key -> toy name.
 TOY16 = {
@@ -276,6 +277,127 @@ class TestMBTreeHashes(unittest.TestCase):
 
     def test_empty_tree_root(self):
         self.assertEqual(MBTree().root_hash, node_hash([]))
+
+
+def flip_bit(h, bit):
+    """A copy of hash h with one bit flipped."""
+    b = bytearray(h)
+    b[bit // 8] ^= 1 << (bit % 8)
+    return bytes(b)
+
+
+def copy_proof(proof):
+    return [(list(left), list(right)) for left, right in proof]
+
+
+class TestMBTreeRead(unittest.TestCase):
+
+    def setUp(self):
+        self.tree = MBTree(4)
+        for k, v in TOY16.items():
+            self.tree.insert(k, v)
+        self.root = self.tree.root_hash  # the trusted root, as the owner would publish it
+
+    def test_read_2_matches_hand_answer(self):
+        """read(2) sends h1, h3 | h_L2, h_L3 | h_B: exactly the 5 hashes worked out by hand."""
+        value, proof = self.tree.read(2)
+        self.assertEqual(value, "car")
+        h = {k: record_hash(k, v) for k, v in TOY16.items()}
+        L2 = node_hash([h[4], h[5], h[6]])
+        L3 = node_hash([h[7], h[8], h[9]])
+        B = node_hash([node_hash([h[10], h[11], h[12]]), node_hash([h[13], h[14], h[15], h[16]])])
+        self.assertEqual(proof, [
+            ([h[1]], [h[3]]),   # leaf L1: left and right of record 2
+            ([], [L2, L3]),     # node A: L1 is first, so nothing on the left
+            ([], [B]),          # root: A is first
+        ])
+        self.assertTrue(verify_read(2, value, proof, self.root))
+
+    def test_every_key_verifies(self):
+        for k, v in TOY16.items():
+            value, proof = self.tree.read(k)
+            self.assertEqual(value, v)
+            self.assertTrue(verify_read(k, value, proof, self.root))
+            # (number of entries - 1) hashes per node on the path
+            expected = sum(len(left) + len(right) for left, right in proof)
+            self.assertEqual(expected, {1: 5, 2: 5, 3: 5, 4: 5, 5: 5, 6: 5, 7: 5, 8: 5, 9: 5,
+                                        10: 4, 11: 4, 12: 4, 13: 5, 14: 5, 15: 5, 16: 5}[k])
+
+    def test_random_trees_verify(self):
+        rng = random.Random(11)
+        for fanout in (3, 4, 5, 8, 32):
+            tree = MBTree(fanout)
+            keys = rng.sample(range(10**6), 500)
+            for k in keys:
+                tree.insert(k, f"value-{k}")
+            for k in rng.sample(keys, 100):
+                tree.update(k, f"value-{k}-u1")
+            for k in keys:
+                value, proof = tree.read(k)
+                self.assertEqual(value, tree.search(k))
+                self.assertTrue(verify_read(k, value, proof, tree.root_hash))
+                self.assertEqual(len(proof), tree.height)  # one step per level
+
+    def test_missing_key(self):
+        self.assertEqual(self.tree.read(99), (None, None))  # A4: "not found", no proof
+        self.assertEqual(MBTree().read(1), (None, None))
+
+    # ----- tampering: every one of these must be rejected -----
+
+    def test_reject_changed_value_or_key(self):
+        value, proof = self.tree.read(2)
+        self.assertFalse(verify_read(2, "robot", proof, self.root))   # server lies about the value
+        self.assertFalse(verify_read(2, "car ", proof, self.root))    # even one extra space
+        self.assertFalse(verify_read(3, value, proof, self.root))     # right value, wrong key
+        v3, _ = self.tree.read(3)
+        self.assertFalse(verify_read(3, v3, proof, self.root))        # real record 3, but 2's proof
+
+    def test_reject_any_flipped_bit_in_proof(self):
+        value, proof = self.tree.read(2)
+        for level, (left, right) in enumerate(proof):
+            for side, hashes in ((0, left), (1, right)):
+                for j in range(len(hashes)):
+                    for bit in range(256):
+                        bad = copy_proof(proof)
+                        bad[level][side][j] = flip_bit(hashes[j], bit)
+                        self.assertFalse(verify_read(2, value, bad, self.root))
+
+    def test_reject_changed_proof_shape(self):
+        value, proof = self.tree.read(5)  # middle of L2: [h4] | [h6]
+        cases = {}
+        bad = copy_proof(proof); bad[0] = (bad[0][1], bad[0][0]); cases["left and right swapped"] = bad
+        bad = copy_proof(proof); bad[0] = ([], bad[0][0] + bad[0][1]); cases["record moved to first place"] = bad
+        bad = copy_proof(proof); bad[1][1].pop(); cases["a hash removed"] = bad
+        bad = copy_proof(proof); bad[1][1].append(bad[1][1][0]); cases["a hash added"] = bad
+        bad = copy_proof(proof); bad.pop(); cases["root level removed"] = bad
+        bad = copy_proof(proof); bad.append(([], [])); cases["extra level added"] = bad
+        bad = copy_proof(proof); bad[0], bad[1] = bad[1], bad[0]; cases["levels in the wrong order"] = bad
+        bad = copy_proof(proof); bad[0][0][0] = bad[0][0][0][:31]; cases["hash too short"] = bad
+        bad = copy_proof(proof); bad[0][0][0] = "not bytes"; cases["hash of the wrong type"] = bad
+        cases["no proof at all"] = None
+        cases["empty proof"] = []
+        for name, bad in cases.items():
+            with self.subTest(name):
+                self.assertFalse(verify_read(5, "yo-yo", bad, self.root))
+
+    def test_reject_wrong_root(self):
+        value, proof = self.tree.read(2)
+        self.assertFalse(verify_read(2, value, proof, flip_bit(self.root, 0)))
+        self.assertFalse(verify_read(2, value, proof, b""))
+
+    def test_old_proof_fails_after_update(self):
+        """After an update the owner publishes a new root; old answers no longer verify."""
+        old_value, old_proof = self.tree.read(5)
+        self.tree.update(5, "robot")
+        new_root = self.tree.root_hash
+        self.assertFalse(verify_read(5, old_value, old_proof, new_root))  # stale answer replayed
+        value, proof = self.tree.read(5)
+        self.assertEqual(value, "robot")
+        self.assertTrue(verify_read(5, value, proof, new_root))
+        self.assertFalse(verify_read(5, value, proof, self.root))         # new answer vs old root
+        # a record whose path did not change still has a valid proof, with a new sibling hash
+        value, proof = self.tree.read(14)
+        self.assertTrue(verify_read(14, value, proof, new_root))
 
 
 if __name__ == "__main__":

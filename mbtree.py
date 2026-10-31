@@ -53,6 +53,29 @@ class MBTree(BPlusTree):
     def root_hash(self):
         return self.root.digest
 
+    # ---------- authenticated read (the server's side) ----------
+
+    def read(self, key):
+        """Return (value, proof), or (None, None) if the key is not in the tree (assumption A4).
+
+        The proof lists, for every node from the leaf up to the root, the hashes
+        to the LEFT and to the RIGHT of the entry on the path:
+            [(left_hashes, right_hashes), ...]   (leaf first, root last)
+        The client hashes the record, puts it between left and right, hashes
+        that node, and repeats up to the root (see verify.py).
+        """
+        path, leaf, i = self._locate(key)
+        if i is None:
+            return None, None
+        return leaf.values[i], self._point_proof(path, leaf, i)
+
+    def _point_proof(self, path, leaf, i):
+        proof = [(leaf.hashes[:i], leaf.hashes[i + 1:])]
+        for node, j in reversed(path):  # leaf's parent first, root last
+            hashes = entry_hashes(node)
+            proof.append((hashes[:j], hashes[j + 1:]))
+        return proof
+
     # ---------- keeping the hashes up to date ----------
 
     def _put_record(self, leaf, i, key, value):

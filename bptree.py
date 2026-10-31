@@ -83,14 +83,19 @@ class BPlusTree:
             node = node.children[i]
         return path, node
 
-    def search(self, key):
-        """Return the value stored for `key`, or None if the key is not in the tree."""
+    def _locate(self, key):
+        """Find `key`. Returns (path, leaf, i) with leaf.keys[i] == key, or i = None if absent."""
         _check_key(key)
-        _, leaf = self._descend(key)
+        path, leaf = self._descend(key)
         i = bisect_left(leaf.keys, key)
         if i < len(leaf.keys) and leaf.keys[i] == key:
-            return leaf.values[i]
-        return None
+            return path, leaf, i
+        return path, leaf, None
+
+    def search(self, key):
+        """Return the value stored for `key`, or None if the key is not in the tree."""
+        _, leaf, i = self._locate(key)
+        return None if i is None else leaf.values[i]
 
     def range_search(self, low, high):
         """Return [(key, value), ...] for every record with low <= key <= high, in key order."""
@@ -175,9 +180,8 @@ class BPlusTree:
     def update(self, key, new_value):
         """Change the value of an existing record. Raises KeyError if the key is missing."""
         _check_types(key, new_value)
-        path, leaf = self._descend(key)
-        i = bisect_left(leaf.keys, key)
-        if i == len(leaf.keys) or leaf.keys[i] != key:
+        path, leaf, i = self._locate(key)
+        if i is None:
             raise KeyError(f"key {key} not found")
         leaf.values[i] = new_value
         self._after_update(path, leaf, i)
