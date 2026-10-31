@@ -1,0 +1,9 @@
+# Personal study material - not part of the submission
+study-notes/
+
+# Private email screenshots and the copyrighted paper/task PDFs
+Docs/
+
+# Python cache
+__pycache__/
+*.pyc
