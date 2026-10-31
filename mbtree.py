@@ -92,16 +92,7 @@ class MBTree(BPlusTree):
             list            a child node that is shown (same format, nested)
         The nesting is the paper's "node boundary information" (footnote 1).
         """
-        records = self.range_search(low, high)
-        before = self._key_before(low)
-        after = self._key_after(high)
-        # The shown records run from `first` to `last`: the answer plus the boundaries.
-        first = before if before is not None else (records[0][0] if records else after)
-        last = after if after is not None else (records[-1][0] if records else before)
-        if first is not None and first > last:
-            # Only when low > high and some keys lie between them: showing one of
-            # those keys (it is > high and < low) proves the empty answer.
-            first = last = after
+        records, first, last = self._range_span(low, high)
         return records, self._range_proof(self.root, first, last)
 
     def _range_proof(self, node, first, last):

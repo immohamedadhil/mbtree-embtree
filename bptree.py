@@ -140,6 +140,25 @@ class BPlusTree:
             return leaf.next.keys[0]
         return None
 
+    def _range_span(self, low, high):
+        """What a range proof must show: (records, first, last).
+
+        records: every record with low <= key <= high.
+        first..last: the keys to show = the records plus one boundary record on
+        each side (paper Section 3.2): the largest key < low and the smallest
+        key > high. Both are None for an empty tree.
+        """
+        records = self.range_search(low, high)
+        before = self._key_before(low)
+        after = self._key_after(high)
+        first = before if before is not None else (records[0][0] if records else after)
+        last = after if after is not None else (records[-1][0] if records else before)
+        if first is not None and first > last:
+            # Only when low > high and some keys lie between them: showing one of
+            # those keys (it is > high and < low) proves the empty answer.
+            first = last = after
+        return records, first, last
+
     # ---------- insert ----------
 
     def insert(self, key, value):
