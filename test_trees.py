@@ -2,8 +2,11 @@
 import itertools
 import random
 import unittest
+from unittest.mock import patch
 
 from bptree import BPlusTree
+from hashing import H, encode_record, node_hash, record_hash
+from mbtree import MBTree
 
 # The 16-key toy example (email): key -> toy name.
 TOY16 = {
@@ -15,13 +18,17 @@ TOY16 = {
 
 
 class TestBPlusTree(unittest.TestCase):
+    tree_class = BPlusTree
+
+    def check(self, tree):
+        tree.check_invariants()
 
     def build(self, items, fanout=4):
-        """Insert items one by one, checking every B+ rule after each insert."""
-        tree = BPlusTree(fanout)
+        """Insert items one by one, checking the tree after each insert."""
+        tree = self.tree_class(fanout)
         for k, v in items:
             tree.insert(k, v)
-            tree.check_invariants()
+            self.check(tree)
         return tree
 
     def test_toy16_shape(self):
@@ -41,7 +48,7 @@ class TestBPlusTree(unittest.TestCase):
         tree = self.build(TOY16.items())
         for k in range(17, 24):
             tree.insert(k, f"toy-{k}")
-            tree.check_invariants()
+            self.check(tree)
         self.assertEqual(tree.levels(), [
             [[10, 19]],
             [[4, 7], [13, 16], [22]],
@@ -68,7 +75,7 @@ class TestBPlusTree(unittest.TestCase):
                 for k in rng.sample(keys, 200):  # change some values
                     truth[k] = f"value-{k}-u1"
                     tree.update(k, truth[k])
-                tree.check_invariants()
+                self.check(tree)
 
                 for k in range(-5, 10_005):  # every key, present or missing
                     self.assertEqual(tree.search(k), truth.get(k))
@@ -93,7 +100,7 @@ class TestBPlusTree(unittest.TestCase):
         tree.update(5, "robot")
         self.assertEqual(tree.search(5), "robot")
         self.assertEqual(tree.levels(), before)  # an update never changes the tree's shape
-        tree.check_invariants()
+        self.check(tree)
 
     def test_errors(self):
         tree = self.build(TOY16.items())
@@ -108,7 +115,7 @@ class TestBPlusTree(unittest.TestCase):
         with self.assertRaises(TypeError):
             tree.insert(30, 123)                     # A8: values are text
         with self.assertRaises(ValueError):
-            BPlusTree(fanout=2)                      # A6: fanout must be at least 3
+            self.tree_class(fanout=2)                # A6: fanout must be at least 3
         for bad in ("5", 1.5, True):                 # A8: search/range also need int keys
             with self.assertRaises(TypeError):
                 tree.search(bad)
@@ -117,11 +124,11 @@ class TestBPlusTree(unittest.TestCase):
             with self.assertRaises(TypeError):
                 tree.range_search(1, bad)
             with self.assertRaises(TypeError):
-                BPlusTree().search(bad)              # same error on an empty tree
+                self.tree_class().search(bad)        # same error on an empty tree
 
     def test_empty_tree(self):
-        tree = BPlusTree()
-        tree.check_invariants()
+        tree = self.tree_class()
+        self.check(tree)
         self.assertIsNone(tree.search(1))
         self.assertEqual(tree.range_search(0, 100), [])
         with self.assertRaises(KeyError):
@@ -165,6 +172,110 @@ class TestBPlusTree(unittest.TestCase):
         self.assertEqual([k for k, _ in gap.range_search(4, 5)], [5])  # low is missing and past its leaf's end
         self.assertEqual(gap.range_search(4, 4), [])
         self.assertIsNone(gap.search(4))
+
+
+class TestHashing(unittest.TestCase):
+
+    def test_sha256_known_answer(self):
+        """SHA-256("abc") from the official test vectors (FIPS 180-2)."""
+        self.assertEqual(H(b"abc").hex(),
+                         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    def test_encoding_is_unambiguous(self):
+        self.assertNotEqual(encode_record(1, "23"), encode_record(12, "3"))
+        rng = random.Random(7)
+        records = {(rng.randint(-2**70, 2**70), str(rng.randint(0, 99))) for _ in range(2000)}
+        records |= {(k, v) for k in (-129, -128, -1, 0, 1, 127, 128, 255, 256) for v in ("", "a")}
+        encodings = {encode_record(k, v) for k, v in records}
+        self.assertEqual(len(encodings), len(records))  # no two records share bytes
+
+    def test_labels_keep_records_and_nodes_apart(self):
+        """A2: the same bytes hashed as a record and as a node give different hashes."""
+        data = encode_record(1, "ball")
+        self.assertEqual(record_hash(1, "ball"), H(b"\x00" + data))
+        self.assertNotEqual(record_hash(1, "ball"), H(b"\x01" + data))
+
+
+class TestMBTreeAsBPlusTree(TestBPlusTree):
+    """Every B+ tree test again, on the MB-tree, also re-checking all hashes after each insert."""
+    tree_class = MBTree
+
+    def check(self, tree):
+        tree.check_invariants()
+        tree.check_hashes()
+
+
+class TestMBTreeHashes(unittest.TestCase):
+
+    def toy(self):
+        tree = MBTree(4)
+        for k, v in TOY16.items():
+            tree.insert(k, v)
+        return tree
+
+    def test_toy16_root_by_hand(self):
+        """The paper's formulas applied by hand to the known toy tree shape give the same root."""
+        h = {k: record_hash(k, v) for k, v in TOY16.items()}
+        L1 = node_hash([h[1], h[2], h[3]])
+        L2 = node_hash([h[4], h[5], h[6]])
+        L3 = node_hash([h[7], h[8], h[9]])
+        L4 = node_hash([h[10], h[11], h[12]])
+        L5 = node_hash([h[13], h[14], h[15], h[16]])
+        A = node_hash([L1, L2, L3])
+        B = node_hash([L4, L5])
+        self.assertEqual(self.toy().root_hash, node_hash([A, B]))
+
+    def count_hashing(self, operation):
+        """Run operation(); return (record hashes computed, node hashes computed)."""
+        with patch("mbtree.record_hash", wraps=record_hash) as rh, \
+             patch("mbtree.node_hash", wraps=node_hash) as nh:
+            operation()
+        return rh.call_count, nh.call_count
+
+    def test_only_the_path_is_rehashed(self):
+        """Paper Section 4.2: a change re-hashes one record and the nodes on its path, nothing else."""
+        tree = self.toy()  # height 3
+        self.assertEqual(self.count_hashing(lambda: tree.update(5, "robot")), (1, 3))  # L2, A, root
+        self.assertEqual(self.count_hashing(lambda: tree.insert(0, "dice")), (1, 3))   # L1, A, root
+        # 17 splits L5: L5, the new leaf, B, root
+        self.assertEqual(self.count_hashing(lambda: tree.insert(17, "kazoo")), (1, 4))
+
+    def test_hashes_fresh_after_every_operation(self):
+        """Random inserts and updates; after every single one, all hashes are recomputed and compared."""
+        rng = random.Random(3)
+        for fanout in (3, 4, 5):
+            tree = MBTree(fanout)
+            keys = []
+            for step in range(600):
+                if keys and rng.random() < 0.4:
+                    k = rng.choice(keys)
+                    tree.update(k, f"value-{k}-u{step}")
+                else:
+                    k = rng.randint(0, 10**6)
+                    if k in keys:
+                        continue
+                    tree.insert(k, f"value-{k}")
+                    keys.append(k)
+                tree.check_invariants()
+                tree.check_hashes()
+
+    def test_root_reacts_to_every_record(self):
+        tree = self.toy()
+        original = tree.root_hash
+        roots = set()
+        for k, v in TOY16.items():
+            tree.update(k, v + "!")
+            roots.add(tree.root_hash)
+            tree.update(k, v)                      # change it back...
+            self.assertEqual(tree.root_hash, original)  # ...and the old root returns
+        self.assertEqual(len(roots), 16)           # each change gave its own new root
+        self.assertNotIn(original, roots)
+
+    def test_same_inserts_same_root(self):
+        self.assertEqual(self.toy().root_hash, self.toy().root_hash)
+
+    def test_empty_tree_root(self):
+        self.assertEqual(MBTree().root_hash, node_hash([]))
 
 
 if __name__ == "__main__":
