@@ -13,6 +13,8 @@ its pointer. It is the same value, stored in one place.
 Updates (paper Section 4.2): only the nodes on the path from the changed leaf
 up to the root are re-hashed.
 """
+from bisect import bisect_right
+
 from bptree import BPlusTree, Inner, Leaf
 from hashing import node_hash, record_hash
 
@@ -75,6 +77,43 @@ class MBTree(BPlusTree):
             hashes = entry_hashes(node)
             proof.append((hashes[:j], hashes[j + 1:]))
         return proof
+
+    def read_range(self, low, high):
+        """Return (records, proof) for all records with low <= key <= high.
+
+        Paper Section 3.2, Figure 4: the proof also carries one boundary record
+        on each side (the largest key < low and the smallest key > high), so the
+        client can check that nothing in the range was left out.
+
+        The proof is a copy of the tree in which every part the client does not
+        need is replaced by its hash. Each node is a list of items:
+            bytes           the hash of a hidden record or hidden subtree
+            (key, value)    a record that is shown
+            list            a child node that is shown (same format, nested)
+        The nesting is the paper's "node boundary information" (footnote 1).
+        """
+        records = self.range_search(low, high)
+        before = self._key_before(low)
+        after = self._key_after(high)
+        # The shown records run from `first` to `last`: the answer plus the boundaries.
+        first = before if before is not None else (records[0][0] if records else after)
+        last = after if after is not None else (records[-1][0] if records else before)
+        if first is not None and first > last:
+            # Only when low > high and some keys lie between them: showing one of
+            # those keys (it is > high and < low) proves the empty answer.
+            first = last = after
+        return records, self._range_proof(self.root, first, last)
+
+    def _range_proof(self, node, first, last):
+        if isinstance(node, Leaf):
+            return [(k, v) if first <= k <= last else h
+                    for k, v, h in zip(node.keys, node.values, node.hashes)]
+        # The two walks (to `first` and to `last`) pass through children lo..hi;
+        # those are shown, every other child is replaced by its hash.
+        lo = bisect_right(node.keys, first)
+        hi = bisect_right(node.keys, last)
+        return [self._range_proof(child, first, last) if lo <= i <= hi else child.digest
+                for i, child in enumerate(node.children)]
 
     # ---------- keeping the hashes up to date ----------
 

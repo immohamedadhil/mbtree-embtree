@@ -114,6 +114,32 @@ class BPlusTree:
             i = 0
         return result
 
+    def _key_before(self, key):
+        """The largest key in the tree that is smaller than `key`, or None."""
+        path, leaf = self._descend(key)
+        i = bisect_left(leaf.keys, key)
+        if i > 0:
+            return leaf.keys[i - 1]
+        # Everything in this leaf is >= key: go up until we can step one child
+        # to the left, then down that subtree's right edge to its last key.
+        for node, j in reversed(path):
+            if j > 0:
+                child = node.children[j - 1]
+                while isinstance(child, Inner):
+                    child = child.children[-1]
+                return child.keys[-1]
+        return None
+
+    def _key_after(self, key):
+        """The smallest key in the tree that is larger than `key`, or None."""
+        _, leaf = self._descend(key)
+        i = bisect_right(leaf.keys, key)
+        if i < len(leaf.keys):
+            return leaf.keys[i]
+        if leaf.next is not None:
+            return leaf.next.keys[0]
+        return None
+
     # ---------- insert ----------
 
     def insert(self, key, value):
