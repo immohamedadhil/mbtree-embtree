@@ -836,5 +836,62 @@ class TestEMBTreeRange(TestMBTreeRange):
                         self.assertFalse(verify_range(low, high, records, bad, tree.root_hash))
 
 
+# ======================= both trees together =======================
+
+def outcome(operation):
+    """Run operation(); return ("ok", result) or ("error", the exception type)."""
+    try:
+        return "ok", operation()
+    except (KeyError, TypeError, ValueError) as e:
+        return "error", type(e)
+
+
+class TestBothTreesAgree(unittest.TestCase):
+
+    def test_identical_results_on_the_same_workload(self):
+        """README: both trees return identical results after identical sequences of
+        inserts, reads and updates. Every answer is also verified against each tree's own root."""
+        rng = random.Random(21)
+        for fanout, fk in [(4, 2), (5, 2), (8, 3), (16, 4)]:
+            with self.subTest(fanout=fanout, fk=fk):
+                mb, emb = MBTree(fanout), EMBTree(fanout, fk)
+                truth = {}
+                for step in range(1500):
+                    op = rng.random()
+                    key = rng.randint(0, 800)  # small key space: duplicates and misses happen
+                    if op < 0.4:
+                        value = f"value-{key}-s{step}"
+                        a = outcome(lambda: mb.insert(key, value))
+                        b = outcome(lambda: emb.insert(key, value))
+                        self.assertEqual(a, b)
+                        truth.setdefault(key, value)
+                    elif op < 0.6:
+                        value = f"value-{key}-u{step}"
+                        a = outcome(lambda: mb.update(key, value))
+                        b = outcome(lambda: emb.update(key, value))
+                        self.assertEqual(a, b)
+                        if key in truth:
+                            truth[key] = value
+                    elif op < 0.8:
+                        (va, pa), (vb, pb) = mb.read(key), emb.read(key)
+                        self.assertEqual(va, vb)
+                        self.assertEqual(va, truth.get(key))
+                        if va is not None:
+                            self.assertTrue(verify_read(key, va, pa, mb.root_hash))
+                            self.assertTrue(verify_read(key, vb, pb, emb.root_hash))
+                    else:
+                        low = rng.randint(-10, 810)
+                        high = low + rng.randint(-5, 150)
+                        (ra, pa), (rb, pb) = mb.read_range(low, high), emb.read_range(low, high)
+                        self.assertEqual(ra, rb)
+                        self.assertEqual(ra, sorted((k, v) for k, v in truth.items() if low <= k <= high))
+                        self.assertTrue(verify_range(low, high, ra, pa, mb.root_hash))
+                        self.assertTrue(verify_range(low, high, rb, pb, emb.root_hash))
+                self.assertEqual(mb.levels(), emb.levels())  # same B+ tree shape underneath
+                self.assertEqual(len(mb), len(truth))
+                mb.check_hashes()
+                emb.check_hashes()
+
+
 if __name__ == "__main__":
     unittest.main()
