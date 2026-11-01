@@ -357,9 +357,39 @@ class TestMBTreeRead(unittest.TestCase):
                 self.assertEqual(value, tree.search(k))
                 self.assertTrue(verify_read(k, value, proof, tree.root_hash))
 
-    def test_missing_key(self):
-        self.assertEqual(self.tree.read(99), (None, None))  # A4: "not found", no proof
-        self.assertEqual(self.new_tree().read(1), (None, None))
+    def test_missing_key_proven_absent(self):
+        """A4: "not found" comes with a proof (the range proof for [key, key])."""
+        for key in (0, 99, -5):
+            value, proof = self.tree.read(key)
+            self.assertIsNone(value)
+            self.assertTrue(verify_read(key, None, proof, self.root))
+        gap = self.new_tree(4)
+        for k in (1, 2, 3, 5, 6, 7, 8):
+            gap.insert(k, f"v{k}")
+        value, proof = gap.read(4)
+        self.assertIsNone(value)
+        self.assertTrue(verify_read(4, None, proof, gap.root_hash))
+        empty = self.new_tree()
+        value, proof = empty.read(1)
+        self.assertIsNone(value)
+        self.assertTrue(verify_read(1, None, proof, empty.root_hash))
+
+    def test_reject_false_not_found(self):
+        """A server that says "not found" for a key that exists is caught, whatever proof it sends."""
+        _, absent_proof = self.tree.read(99)  # a real proof that 99 is absent
+        for k in TOY16:
+            _, range_proof = self.tree.read_range(k, k)
+            _, point_proof = self.tree.read(k)
+            fake_proofs = {
+                "honest range proof for [k, k]": range_proof,
+                "range proof with record k hidden": hide(range_proof, k),
+                "another key's absence proof": absent_proof,
+                "the point proof for k": point_proof,
+                "no proof": None,
+            }
+            for name, proof in fake_proofs.items():
+                with self.subTest(key=k, fake=name):
+                    self.assertFalse(verify_read(k, None, proof, self.root))
 
     # ----- tampering: every one of these must be rejected -----
 
@@ -444,6 +474,22 @@ def positions_items(proof):
 def get_at(proof, where):
     for i in where:
         proof = proof[i]
+    return proof
+
+
+def hide(proof, key):
+    """A copy of a range proof with the record for `key` replaced by its honest hash."""
+    if isinstance(proof, tuple):
+        return record_hash(*proof) if proof[0] == key else proof
+    if isinstance(proof, list):
+        return [hide(x, key) for x in proof]
+    return proof
+
+
+def deeply_nested(depth):
+    proof = []
+    for _ in range(depth):
+        proof = [proof]
     return proof
 
 
@@ -612,6 +658,7 @@ class TestMBTreeRange(unittest.TestCase):
             "hash too short": replaced(proof, first_hash, get_at(proof, first_hash)[:31]),
             "root not a list": self.root,
             "no proof": None,
+            "nested 5000 levels deep": deeply_nested(5000),
         }
         for name, bad in cases.items():
             with self.subTest(name):
@@ -876,9 +923,8 @@ class TestBothTreesAgree(unittest.TestCase):
                         (va, pa), (vb, pb) = mb.read(key), emb.read(key)
                         self.assertEqual(va, vb)
                         self.assertEqual(va, truth.get(key))
-                        if va is not None:
-                            self.assertTrue(verify_read(key, va, pa, mb.root_hash))
-                            self.assertTrue(verify_read(key, vb, pb, emb.root_hash))
+                        self.assertTrue(verify_read(key, va, pa, mb.root_hash))   # also "not found"
+                        self.assertTrue(verify_read(key, vb, pb, emb.root_hash))
                     else:
                         low = rng.randint(-10, 810)
                         high = low + rng.randint(-5, 150)

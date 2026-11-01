@@ -82,12 +82,18 @@ def verify_range(low, high, records, proof, trusted_root):
             return False
         # 5. the answer is exactly the shown records inside the range
         return [(k, v) for k, v in recs if low <= k <= high] == list(records)
-    except (TypeError, ValueError, AttributeError):
-        return False  # a proof of the wrong shape is simply rejected
+    except (TypeError, ValueError, AttributeError, RecursionError):
+        return False  # a proof of the wrong shape (or absurdly deep) is simply rejected
 
 
 def verify_read(key, value, proof, trusted_root):
-    """True if (key, value) is a record in the tree whose root hash is trusted_root."""
+    """True if (key, value) is a record in the tree whose root hash is trusted_root.
+
+    value None means "not found": then the proof must show that the key is
+    absent (it is the range proof for [key, key]).
+    """
+    if value is None:
+        return verify_range(key, key, [], proof, trusted_root)
     try:
         for left, right in proof:
             if not all(_is_hash(x) for x in list(left) + list(right)):

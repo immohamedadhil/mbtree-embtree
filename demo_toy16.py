@@ -89,8 +89,10 @@ def main():
             value, proof = tree.read(key)
             print(f"   {name}  read({key}) = {value!r}, {count_hashes(proof)} hashes: {show_read_proof(proof)}")
             check(f"client accepts read({key})", verify_read(key, value, proof, roots[name]))
-    value, proof = mb.read(99)
-    print(f"   read(99) on a missing key -> {value!r}, {proof!r} (not found)")
+    for name, tree in trees.items():
+        value, proof = tree.read(99)
+        print(f"   {name}  read(99) = {value!r} (not found); proof of absence: {show_range_proof(proof)}")
+        check("client accepts that 99 is not in the tree", verify_read(99, None, proof, roots[name]))
 
     section("read_range(low, high): records + boundary records + hashes")
     for low, high in ((1, 5), (9, 12), (17, 20)):
@@ -133,6 +135,8 @@ def main():
         side = bad[0][0] or bad[0][1]
         side[0] = bytes([side[0][0] ^ 1]) + side[0][1:]  # flip one bit of one proof hash
         check("one bit of one proof hash flipped", not verify_read(2, value, bad, roots[name]))
+        _, absent = tree.read(99)
+        check("'not found' claimed for key 2, which exists", not verify_read(2, None, absent, roots[name]))
         records, proof = tree.read_range(9, 12)
         check("record 10 hidden from read_range(9, 12)",
               not verify_range(9, 12, [r for r in records if r[0] != 10], hide_record(proof, 10), roots[name]))

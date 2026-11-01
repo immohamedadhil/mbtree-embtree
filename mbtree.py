@@ -4,7 +4,7 @@ A B+ tree whose entries carry hashes:
 - leaf entry i:   h_i = H(record i)
 - inner entry i:  h_i = the hash of child i = H(child's h_1 | ... | h_f)
 The root's hash covers every record. The owner gives it to clients as the
-trusted root; proofs (Step 3) are checked against it.
+trusted root; proofs are checked against it (verify.py).
 
 Storage note: the paper keeps each child's hash in the parent's entry (k|p|h).
 Here every node keeps its own hash in `digest`, and the parent reads it through
@@ -58,17 +58,22 @@ class MBTree(BPlusTree):
     # ---------- authenticated read (the server's side) ----------
 
     def read(self, key):
-        """Return (value, proof), or (None, None) if the key is not in the tree (assumption A4).
+        """Return (value, proof).
 
-        The proof lists, for every node from the leaf up to the root, the hashes
-        to the LEFT and to the RIGHT of the entry on the path:
+        Key found: the proof lists, for every node from the leaf up to the root,
+        the hashes to the LEFT and to the RIGHT of the entry on the path:
             [(left_hashes, right_hashes), ...]   (leaf first, root last)
         The client hashes the record, puts it between left and right, hashes
         that node, and repeats up to the root (see verify.py).
+
+        Key missing (assumption A4): value is None and the proof is the range
+        proof for [key, key]. It shows the two neighbouring records, so it
+        proves the key is absent; a server cannot hide a record by just
+        saying "not found".
         """
         path, leaf, i = self._locate(key)
         if i is None:
-            return None, None
+            return None, self.read_range(key, key)[1]
         return leaf.values[i], self._point_proof(path, leaf, i)
 
     def _point_proof(self, path, leaf, i):

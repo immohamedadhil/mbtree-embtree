@@ -76,15 +76,17 @@ class EMBTree(BPlusTree):
     # ---------- authenticated read (the server's side) ----------
 
     def read(self, key):
-        """Return (value, proof), or (None, None) if the key is not in the tree (assumption A4).
+        """Return (value, proof).
 
         Same proof format as the MB-tree: [(left_hashes, right_hashes), ...],
         bottom-up. Here every node adds one step per level of its small tree,
         each with at most f_k - 1 hashes (paper: (f_k - 1) * d_k per node).
+        Key missing (assumption A4): (None, the range proof for [key, key]),
+        which proves the key is absent.
         """
         path, leaf, i = self._locate(key)
         if i is None:
-            return None, None
+            return None, self.read_range(key, key)[1]
         proof = self._steps_in_node(leaf, i)
         for node, j in reversed(path):  # leaf's parent first, root last
             proof += self._steps_in_node(node, j)
