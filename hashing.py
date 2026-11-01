@@ -24,7 +24,7 @@ def encode_record(key, value):
     key:   signed big-endian integer (any size, also negative), with its length in front
     value: UTF-8 text, with its length in front
     The lengths make the bytes unambiguous: two different records never give the
-    same bytes (without them, (1, "23") and (12, "3") could collide).
+    same bytes (without them, (353, "b") and (1, "ab") would both be 01 61 62).
     """
     k = key.to_bytes((key.bit_length() + 8) // 8, "big", signed=True)
     v = value.encode("utf-8")

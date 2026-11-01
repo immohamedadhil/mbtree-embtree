@@ -191,7 +191,8 @@ class TestHashing(unittest.TestCase):
                          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 
     def test_encoding_is_unambiguous(self):
-        self.assertNotEqual(encode_record(1, "23"), encode_record(12, "3"))
+        # without the length fields both would be the bytes 01 61 62
+        self.assertNotEqual(encode_record(353, "b"), encode_record(1, "ab"))
         rng = random.Random(7)
         records = {(rng.randint(-2**70, 2**70), str(rng.randint(0, 99))) for _ in range(2000)}
         records |= {(k, v) for k in (-129, -128, -1, 0, 1, 127, 128, 255, 256) for v in ("", "a")}
