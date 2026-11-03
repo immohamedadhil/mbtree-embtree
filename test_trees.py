@@ -5,10 +5,9 @@ import random
 import unittest
 from unittest.mock import patch
 
-from bptree import BPlusTree
-from embtree import EMBTree, build_levels
-from hashing import H, encode_record, node_hash, record_hash
-from mbtree import MBTree
+from embtree import EMBTree, build_small_tree, slots_for
+from hashing import EMPTY, H, encode_record, node_hash, record_hash
+from mbtree import Leaf, MBTree
 from verify import verify_range, verify_read
 
 # The 16-key toy example (email): key -> toy name.
@@ -20,11 +19,95 @@ TOY16 = {
 }
 
 
+# ======================= checking helpers (they look inside the tree) =======================
+
+def check_invariants(tree):
+    """Fail if any B+ tree rule is broken."""
+    if tree.size == 0:
+        assert isinstance(tree.root, Leaf) and not tree.root.keys, "empty tree must be one empty leaf"
+        return
+    leaves = []
+    check_node(tree, tree.root, 1, True, leaves)
+    # The leaf links must visit exactly the leaves above, in the same order.
+    assert leaves[-1].next is None, "last leaf must not link anywhere"
+    for a, b in zip(leaves, leaves[1:]):
+        assert a.next is b, "leaf links are broken"
+    assert sum(len(leaf.keys) for leaf in leaves) == tree.size, "size counter is wrong"
+
+
+def check_node(tree, node, depth, is_root, leaves):
+    """Check one node's subtree (and collect its leaves); return its (smallest key, largest key)."""
+    min_fill = (tree.fanout + 1) // 2  # "at least half full" for non-root nodes
+    assert node.keys == sorted(node.keys), "keys not sorted"
+    assert len(set(node.keys)) == len(node.keys), "duplicate keys in a node"
+    if isinstance(node, Leaf):
+        assert len(node.keys) == len(node.values) == len(node.hashes), "keys/values/hashes length mismatch"
+        assert len(node.keys) <= tree.fanout, "leaf over-full"
+        if not is_root:
+            assert len(node.keys) >= min_fill, "leaf under-full"
+        assert depth == tree.height, "leaves not all at the same depth"
+        leaves.append(node)
+        return node.keys[0], node.keys[-1]
+    n = len(node.children)
+    assert len(node.keys) == n - 1, "inner node needs one fewer key than children"
+    assert n <= tree.fanout, "inner node over-full"
+    assert n >= (2 if is_root else min_fill), "inner node under-full"
+    lo, hi = check_node(tree, node.children[0], depth + 1, False, leaves)
+    smallest = lo
+    for i, signpost in enumerate(node.keys):
+        assert hi < signpost, "a key on the left is not smaller than its signpost"
+        lo, hi = check_node(tree, node.children[i + 1], depth + 1, False, leaves)
+        assert lo == signpost, "signpost is not the smallest key on its right"
+    return smallest, hi
+
+
+def check_hashes(tree):
+    """Recompute every hash from the records alone; fail if any stored hash differs."""
+    assert tree.root_hash == expected_hash(tree, tree.root), "root_hash is stale"
+
+
+def expected_hash(tree, node):
+    """The node's hash recomputed from the records below it, checked against what is stored."""
+    if isinstance(node, Leaf):
+        entries = [record_hash(k, v) for k, v in zip(node.keys, node.values)]
+        assert node.hashes == entries, "stale record hash in a leaf"
+    else:
+        entries = [expected_hash(tree, child) for child in node.children]
+    if isinstance(tree, EMBTree):
+        small_tree = build_small_tree(entries, tree.fk, tree.slots)
+        assert node.small_tree == small_tree, "stale hash in a node's small tree"
+        digest = small_tree[-1][0]
+    else:
+        digest = node_hash(entries)
+    assert node.digest == digest, "stale node hash"
+    return digest
+
+
+def check_authenticated(tree):
+    """B+ rules every time. The full hash re-check re-hashes the whole tree, so on
+    big trees it runs every 50th call (the *Hashes test classes re-check after
+    every single operation)."""
+    check_invariants(tree)
+    if tree.size <= 100 or tree.size % 50 == 0:
+        check_hashes(tree)
+
+
+def count_hashing(operation):
+    """Run operation(); return (record hashes computed, node hashes computed)."""
+    with patch("mbtree.record_hash", wraps=record_hash) as rh, \
+         patch("mbtree.node_hash", wraps=node_hash) as nh, \
+         patch("embtree.node_hash", wraps=node_hash) as emb_nh:
+        operation()
+    return rh.call_count, nh.call_count + emb_nh.call_count
+
+
+# ======================= B+ tree rules (on the MB-tree; again on the EMB-tree below) =======================
+
 class TestBPlusTree(unittest.TestCase):
-    tree_class = BPlusTree
+    tree_class = MBTree
 
     def check(self, tree):
-        tree.check_invariants()
+        check_authenticated(tree)
 
     def build(self, items, fanout=4):
         """Insert items one by one, checking the tree after each insert."""
@@ -73,7 +156,7 @@ class TestBPlusTree(unittest.TestCase):
                 keys = rng.sample(range(10_000), 1000)
                 truth = {k: f"value-{k}" for k in keys}
                 tree = self.build(truth.items(), fanout)
-                self.assertEqual(len(tree), len(truth))
+                self.assertEqual(tree.size, len(truth))
 
                 for k in rng.sample(keys, 200):  # change some values
                     truth[k] = f"value-{k}-u1"
@@ -113,10 +196,12 @@ class TestBPlusTree(unittest.TestCase):
 
     def test_errors(self):
         tree = self.build(TOY16.items())
+        root = tree.root_hash
         with self.assertRaises(KeyError):
             tree.insert(7, "duplicate")              # A5: duplicate insert
         self.assertEqual(tree.search(7), "drum")     # ...and nothing changed
-        self.assertEqual(len(tree), 16)
+        self.assertEqual(tree.size, 16)
+        self.assertEqual(tree.root_hash, root)
         with self.assertRaises(KeyError):
             tree.update(99, "nothing")               # A5: update of a missing key
         with self.assertRaises(TypeError):
@@ -125,6 +210,12 @@ class TestBPlusTree(unittest.TestCase):
             tree.insert(30, 123)                     # A8: values are text
         with self.assertRaises(ValueError):
             self.tree_class(fanout=2)                # A6: fanout must be at least 3
+        with self.assertRaises(ValueError):
+            tree.insert(10**5000, "v")               # too long to write as text: refused...
+        with self.assertRaises(ValueError):
+            tree.update(1, "\ud800")                 # not valid UTF-8 text: refused...
+        self.check(tree)                             # ...and the tree is unchanged
+        self.assertEqual((tree.size, tree.root_hash, tree.search(1)), (16, root, "ball"))
         for bad in ("5", 1.5, True):                 # A8: search/range also need int keys
             with self.assertRaises(TypeError):
                 tree.search(bad)
@@ -191,8 +282,9 @@ class TestHashing(unittest.TestCase):
                          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 
     def test_encoding_is_unambiguous(self):
-        # without the length fields both would be the bytes 01 61 62
-        self.assertNotEqual(encode_record(353, "b"), encode_record(1, "ab"))
+        self.assertEqual(encode_record(353, "b"), b"\x00\x00\x00\x03" b"353" b"\x00\x00\x00\x01" b"b")
+        # without the length fields both would be the text 123
+        self.assertNotEqual(encode_record(1, "23"), encode_record(12, "3"))
         rng = random.Random(7)
         records = {(rng.randint(-2**70, 2**70), str(rng.randint(0, 99))) for _ in range(2000)}
         records |= {(k, v) for k in (-129, -128, -1, 0, 1, 127, 128, 255, 256) for v in ("", "a")}
@@ -204,23 +296,6 @@ class TestHashing(unittest.TestCase):
         data = encode_record(1, "ball")
         self.assertEqual(record_hash(1, "ball"), H(b"\x00" + data))
         self.assertNotEqual(record_hash(1, "ball"), H(b"\x01" + data))
-
-
-def check_authenticated(tree):
-    """B+ rules every time. The full hash re-check re-hashes the whole tree, so on
-    big trees it runs every 50th call (the *Hashes test classes re-check after
-    every single operation)."""
-    tree.check_invariants()
-    if len(tree) <= 100 or len(tree) % 50 == 0:
-        tree.check_hashes()
-
-
-class TestMBTreeAsBPlusTree(TestBPlusTree):
-    """Every B+ tree test again, on the MB-tree, also re-checking the hashes."""
-    tree_class = MBTree
-
-    def check(self, tree):
-        check_authenticated(tree)
 
 
 class TestMBTreeHashes(unittest.TestCase):
@@ -243,20 +318,13 @@ class TestMBTreeHashes(unittest.TestCase):
         B = node_hash([L4, L5])
         self.assertEqual(self.toy().root_hash, node_hash([A, B]))
 
-    def count_hashing(self, operation):
-        """Run operation(); return (record hashes computed, node hashes computed)."""
-        with patch("mbtree.record_hash", wraps=record_hash) as rh, \
-             patch("mbtree.node_hash", wraps=node_hash) as nh:
-            operation()
-        return rh.call_count, nh.call_count
-
     def test_only_the_path_is_rehashed(self):
         """Paper Section 4.2: a change re-hashes one record and the nodes on its path, nothing else."""
         tree = self.toy()  # height 3
-        self.assertEqual(self.count_hashing(lambda: tree.update(5, "robot")), (1, 3))  # L2, A, root
-        self.assertEqual(self.count_hashing(lambda: tree.insert(0, "dice")), (1, 3))   # L1, A, root
+        self.assertEqual(count_hashing(lambda: tree.update(5, "robot")), (1, 3))  # L2, A, root
+        self.assertEqual(count_hashing(lambda: tree.insert(0, "dice")), (1, 3))   # L1, A, root
         # 17 splits L5: L5, the new leaf, B, root
-        self.assertEqual(self.count_hashing(lambda: tree.insert(17, "kazoo")), (1, 4))
+        self.assertEqual(count_hashing(lambda: tree.insert(17, "kazoo")), (1, 4))
 
     def test_hashes_fresh_after_every_operation(self):
         """Random inserts and updates; after every single one, all hashes are recomputed and compared."""
@@ -274,8 +342,8 @@ class TestMBTreeHashes(unittest.TestCase):
                         continue
                     tree.insert(k, f"value-{k}")
                     keys.append(k)
-                tree.check_invariants()
-                tree.check_hashes()
+                check_invariants(tree)
+                check_hashes(tree)
 
     def test_root_reacts_to_every_record(self):
         tree = self.toy()
@@ -357,23 +425,6 @@ class TestMBTreeRead(unittest.TestCase):
                 value, proof = tree.read(k)
                 self.assertEqual(value, tree.search(k))
                 self.assertTrue(verify_read(k, value, proof, tree.root_hash))
-
-    def test_missing_key_proven_absent(self):
-        """A4: "not found" comes with a proof (the range proof for [key, key])."""
-        for key in (0, 99, -5):
-            value, proof = self.tree.read(key)
-            self.assertIsNone(value)
-            self.assertTrue(verify_read(key, None, proof, self.root))
-        gap = self.new_tree(4)
-        for k in (1, 2, 3, 5, 6, 7, 8):
-            gap.insert(k, f"v{k}")
-        value, proof = gap.read(4)
-        self.assertIsNone(value)
-        self.assertTrue(verify_read(4, None, proof, gap.root_hash))
-        empty = self.new_tree()
-        value, proof = empty.read(1)
-        self.assertIsNone(value)
-        self.assertTrue(verify_read(1, None, proof, empty.root_hash))
 
     def test_reject_false_not_found(self):
         """A server that says "not found" for a key that exists is caught, whatever proof it sends."""
@@ -461,10 +512,12 @@ def item_hash(item):
 
 def positions(node, where=()):
     """Every position inside a range proof, as a tuple of list indices."""
-    for i, item in enumerate(node):
-        yield where + (i,)
-        if isinstance(item, list):
-            yield from positions(item, where + (i,))
+    out = []
+    for i in range(len(node)):
+        out.append(where + (i,))
+        if isinstance(node[i], list):
+            out += positions(node[i], where + (i,))
+    return out
 
 
 def positions_items(proof):
@@ -496,8 +549,10 @@ def deeply_nested(depth):
 
 def find_record(proof, key):
     """Position of the record with this key inside a range proof."""
-    return next(w for w in positions(proof)
-                if isinstance(get_at(proof, w), tuple) and get_at(proof, w)[0] == key)
+    for where in positions(proof):
+        item = get_at(proof, where)
+        if isinstance(item, tuple) and item[0] == key:
+            return where
 
 
 def removed(proof, where):
@@ -565,24 +620,8 @@ class TestMBTreeRange(unittest.TestCase):
                 self.assertEqual(records, self.tree.range_search(low, high))
                 self.assertTrue(verify_range(low, high, records, proof, self.root))
         records, proof = self.tree.read_range(-10, 99)
-        self.assertFalse(any(isinstance(x, bytes) for x in positions_items(proof)))  # all shown
-
-    def test_missing_key_proven_absent(self):
-        """A range over a gap returns nothing, and the proof shows the neighbours 3 and 5."""
-        gap = self.new_tree(4)
-        for k in (1, 2, 3, 5, 6, 7, 8):
-            gap.insert(k, f"v{k}")
-        records, proof = gap.read_range(4, 4)
-        self.assertEqual(records, [])
-        self.assertTrue(verify_range(4, 4, [], proof, gap.root_hash))
-        shown = [x for x in positions_items(proof) if isinstance(x, tuple)]
-        self.assertEqual(shown, [(3, "v3"), (5, "v5")])
-
-    def test_empty_tree(self):
-        tree = self.new_tree()
-        records, proof = tree.read_range(0, 10)
-        self.assertEqual((records, proof), ([], []))
-        self.assertTrue(verify_range(0, 10, [], proof, tree.root_hash))
+        # everything is shown: the only hashes left are EMPTY slots (EMB-tree padding)
+        self.assertTrue(all(x == EMPTY for x in positions_items(proof) if isinstance(x, bytes)))
 
     def test_random_ranges_verify(self):
         rng = random.Random(5)
@@ -649,7 +688,8 @@ class TestMBTreeRange(unittest.TestCase):
 
     def test_reject_changed_proof(self):
         records, proof = self.tree.read_range(9, 12)
-        first_hash = next(w for w in positions(proof) if isinstance(get_at(proof, w), bytes))
+        hash_positions = [w for w in positions(proof) if isinstance(get_at(proof, w), bytes)]
+        first_hash = hash_positions[0]
         cases = {
             "record value changed": replaced(proof, find_record(proof, 11), (11, "robot")),
             "left boundary removed": removed(proof, find_record(proof, 8)),
@@ -684,30 +724,30 @@ class TestMBTreeRange(unittest.TestCase):
 # ======================= EMB-tree =======================
 
 def emb_toy_hashes():
-    """Every hash of the toy EMB-tree (fanout 4, f_k = 2), worked out by hand with rule A1.
-    Names follow the study notes: a/b are the groups of a node's small tree."""
+    """Every hash of the toy EMB-tree (fanout 4, f_k = 2), worked out by hand.
+    Every node has 4 slots; empty slots are E (32 zero bytes); a group of only E is E.
+    Names follow the study notes: a/b are the two groups of a node's small tree."""
     h = {k: record_hash(k, v) for k, v in TOY16.items()}
-    n = node_hash
-    x = dict(h=h)
+    n, E = node_hash, EMPTY
+    x = dict(h=h, E=E)
     for leaf, (first, last) in {1: (1, 3), 2: (4, 6), 3: (7, 9), 4: (10, 12), 5: (13, 16)}.items():
-        keys = list(range(first, last + 1))
-        x[f"aL{leaf}"] = n([h[k] for k in keys[:2]])
-        x[f"bL{leaf}"] = n([h[k] for k in keys[2:]])  # a group of one is hashed too (A1)
+        slots = [h[k] for k in range(first, last + 1)] + [E] * (4 - (last - first + 1))
+        x[f"aL{leaf}"] = n(slots[:2])
+        x[f"bL{leaf}"] = n(slots[2:])           # e.g. L1: H(h3 | E)
         x[f"L{leaf}"] = n([x[f"aL{leaf}"], x[f"bL{leaf}"]])
     x["aA"] = n([x["L1"], x["L2"]])
-    x["bA"] = n([x["L3"]])
+    x["bA"] = n([x["L3"], E])                     # A = [L1 L2 L3 E]
     x["A"] = n([x["aA"], x["bA"]])
-    x["B"] = n([x["L4"], x["L5"]])  # 2 entries: one group
-    x["root"] = n([x["A"], x["B"]])
+    x["aB"] = n([x["L4"], x["L5"]])
+    x["B"] = n([x["aB"], E])                      # B = [L4 L5 E E]: its group (E E) is E
+    x["aR"] = n([x["A"], x["B"]])
+    x["root"] = n([x["aR"], E])                   # Root = [A B E E]
     return x
 
 
 class TestEMBTreeAsBPlusTree(TestBPlusTree):
-    """Every B+ tree test again, on the EMB-tree (f_k = 2), also re-checking the hashes."""
+    """Every B+ tree test again, on the EMB-tree (f_k = 2)."""
     tree_class = EMBTree
-
-    def check(self, tree):
-        check_authenticated(tree)
 
 
 class TestEMBTreeHashes(unittest.TestCase):
@@ -718,14 +758,20 @@ class TestEMBTreeHashes(unittest.TestCase):
             tree.insert(k, v)
         return tree
 
-    def test_rule_A1(self):
-        h = [record_hash(k, "v") for k in range(5)]
-        self.assertEqual(build_levels([], 2), [[], [node_hash([])]])
-        self.assertEqual(build_levels(h[:1], 2), [h[:1], [node_hash(h[:1])]])  # a group of one is hashed
-        a, b = node_hash(h[:2]), node_hash(h[2:3])
-        self.assertEqual(build_levels(h[:3], 2), [h[:3], [a, b], [node_hash([a, b])]])
-        self.assertEqual([len(level) for level in build_levels(h, 2)], [5, 3, 2, 1])
-        self.assertEqual(build_levels(h[:4], 4), [h[:4], [node_hash(h[:4])]])  # f_k >= entries: one group
+    def test_padding_rule(self):
+        """Empty places are filled with EMPTY (32 zero bytes); every group is full."""
+        h, E = [record_hash(k, "v") for k in range(5)], EMPTY
+        self.assertEqual(E, bytes(32))
+        self.assertEqual([slots_for(f, k) for f, k in ((4, 2), (5, 2), (32, 2), (128, 2), (8, 3))],
+                         [4, 8, 32, 128, 9])
+        self.assertIsNone(slots_for(4, 4))          # f_k >= f_e: no small tree
+        a, b = node_hash(h[:2]), node_hash([h[2], E])
+        self.assertEqual(build_small_tree(h[:3], 2, 4), [h[:3] + [E], [a, b], [node_hash([a, b])]])
+        g = node_hash(h[:2])                        # a group of only EMPTY slots stays EMPTY
+        self.assertEqual(build_small_tree(h[:2], 2, 4), [h[:2] + [E, E], [g, E], [node_hash([g, E])]])
+        self.assertEqual(build_small_tree([], 2, 4), [[E] * 4, [E, E], [E]])   # an empty node is EMPTY
+        self.assertEqual([len(level) for level in build_small_tree(h, 2, 8)], [8, 4, 2, 1])
+        self.assertEqual(build_small_tree(h[:3], 4, None), [h[:3], [node_hash(h[:3])]])  # = MB-tree node
 
     def test_toy16_root_by_hand(self):
         self.assertEqual(self.toy().root_hash, emb_toy_hashes()["root"])
@@ -734,19 +780,14 @@ class TestEMBTreeHashes(unittest.TestCase):
         with self.assertRaises(ValueError):
             EMBTree(4, fk=1)
 
-    def count_hashing(self, operation):
-        with patch("embtree.record_hash", wraps=record_hash) as rh, \
-             patch("embtree.node_hash", wraps=node_hash) as nh:
-            operation()
-        return rh.call_count, nh.call_count
-
     def test_update_rehashes_only_the_small_tree_paths(self):
-        """Paper Section 4.3: update(5) re-hashes 1 record, then one path in each small tree:
-        L2 (2 hashes), A (2 hashes), root (1 hash)."""
+        """Paper Section 4.3: update(5) re-hashes 1 record, then one path of 2 hashes in
+        each small tree: L2, A and the root (every small tree has 2 levels)."""
         tree = self.toy()
-        self.assertEqual(self.count_hashing(lambda: tree.update(5, "robot")), (1, 5))
-        # Insert rebuilds the small trees of the changed nodes (A1): L1 (3), A (3), root (1).
-        self.assertEqual(self.count_hashing(lambda: tree.insert(0, "dice")), (1, 7))
+        self.assertEqual(count_hashing(lambda: tree.update(5, "robot")), (1, 6))
+        # insert rebuilds the small trees of the changed nodes: L1 (3), A (3), root (2:
+        # its group of two EMPTY slots needs no hashing). Building the proof hashes nothing.
+        self.assertEqual(count_hashing(lambda: tree.insert(0, "dice")), (1, 8))
 
     def test_hashes_fresh_after_every_operation(self):
         rng = random.Random(4)
@@ -764,8 +805,8 @@ class TestEMBTreeHashes(unittest.TestCase):
                             continue
                         tree.insert(k, f"value-{k}")
                         keys.append(k)
-                    tree.check_invariants()
-                    tree.check_hashes()
+                    check_invariants(tree)
+                    check_hashes(tree)
 
     def test_same_as_mb_tree_when_fk_covers_the_node(self):
         """Paper Section 3.3: for f_k >= f_e the EMB-tree authenticates exactly like the MB-tree."""
@@ -791,37 +832,38 @@ class TestEMBTreeHashes(unittest.TestCase):
 
 class TestEMBTreeRead(TestMBTreeRead):
     """All MB-tree read tests again on the EMB-tree (f_k = 2), plus its own hand-worked proofs."""
-    # (f_k - 1) hashes per small-tree level, fewer where a group is not full
-    TOY_PROOF_SIZES = {1: 5, 2: 5, 3: 4, 4: 5, 5: 5, 6: 4, 7: 4, 8: 4, 9: 3,
-                       10: 4, 11: 4, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4}
+    # every small tree has 2 levels and every group is full: (f_k - 1) * 2 = 2 per node, 3 nodes
+    TOY_PROOF_SIZES = {k: 6 for k in range(1, 17)}
 
     def new_tree(self, fanout=4):
         return EMBTree(fanout, fk=2)
 
     def test_read_2_matches_hand_answer(self):
-        """h1, b_L1, h_L2, b_A, h_B: the 5 hashes worked out by hand."""
+        """h1, b_L1, h_L2, b_A, h_B and one EMPTY slot: 6 hashes worked out by hand."""
         x = emb_toy_hashes()
         value, proof = self.tree.read(2)
         self.assertEqual(proof, [
             ([x["h"][1]], []), ([], [x["bL1"]]),  # leaf L1: group [h1 h2], then [a b]
             ([], [x["L2"]]), ([], [x["bA"]]),     # node A: group [hL1 hL2], then [a b]
-            ([], [x["B"]]),                       # root: one group [hA hB]
+            ([], [x["B"]]), ([], [x["E"]]),       # root: group [hA hB], then [a E]
         ])
         self.assertTrue(verify_read(2, value, proof, self.root))
 
     def test_read_4_matches_hand_answer(self):
-        """h5, b_L2, h_L1, b_A, h_B."""
+        """h5, b_L2, h_L1, b_A, h_B, EMPTY."""
         x = emb_toy_hashes()
         value, proof = self.tree.read(4)
         self.assertEqual(proof, [([], [x["h"][5]]), ([], [x["bL2"]]),
-                                 ([x["L1"]], []), ([], [x["bA"]]), ([], [x["B"]])])
+                                 ([x["L1"]], []), ([], [x["bA"]]), ([], [x["B"]]), ([], [x["E"]])])
         self.assertTrue(verify_read(4, value, proof, self.root))
 
-    def test_read_14_is_smaller_than_mb(self):
-        """h13, b_L5, h_L4, h_A: 4 hashes (the MB-tree needs 5: h13, h15, h16, h_L4, h_A)."""
+    def test_read_14_matches_hand_answer(self):
+        """h13, b_L5, h_L4, EMPTY, h_A, EMPTY: b_L5 stands for h15 and h16, but B and the
+        root, which hold only 2 entries, each add an EMPTY sibling."""
         x = emb_toy_hashes()
         value, proof = self.tree.read(14)
-        self.assertEqual(proof, [([x["h"][13]], []), ([], [x["bL5"]]), ([x["L4"]], []), ([x["A"]], [])])
+        self.assertEqual(proof, [([x["h"][13]], []), ([], [x["bL5"]]), ([x["L4"]], []), ([], [x["E"]]),
+                                 ([x["A"]], []), ([], [x["E"]])])
         self.assertTrue(verify_read(14, value, proof, self.root))
 
     def test_random_trees_other_fk(self):
@@ -835,7 +877,10 @@ class TestEMBTreeRead(TestMBTreeRead):
                 value, proof = tree.read(k)
                 self.assertTrue(verify_read(k, value, proof, tree.root_hash))
                 for left, right in proof:
-                    self.assertLessEqual(len(left) + len(right), fk - 1)  # at most f_k - 1 per step
+                    if tree.slots is None:   # fk >= fanout: no small tree, an MB-tree node
+                        self.assertLessEqual(len(left) + len(right), fanout - 1)
+                    else:                    # padded small tree: every group is full
+                        self.assertEqual(len(left) + len(right), fk - 1)
 
 
 class TestEMBTreeRange(TestMBTreeRange):
@@ -845,21 +890,26 @@ class TestEMBTreeRange(TestMBTreeRange):
         return EMBTree(fanout, fk=2)
 
     def test_range_1_5_matches_hand_answer(self):
-        """Inside node A only the group [L1 L2] is opened; the group [L3] stays hidden as b_A."""
-        x, r = emb_toy_hashes(), self.rec
+        """Inside node A only the group [L1 L2] is opened; the group [L3 E] stays hidden as b_A.
+        Real hashes: b_A and h_B; the E items are empty slots."""
+        x, r, E = emb_toy_hashes(), self.rec, EMPTY
         records, proof = self.tree.read_range(1, 5)
-        L1 = [[r(1), r(2)], [r(3)]]
-        L2 = [[r(4), r(5)], [r(6)]]
-        self.assertEqual(proof, [[[L1, L2], x["bA"]], x["B"]])
+        L1 = [[r(1), r(2)], [r(3), E]]
+        L2 = [[r(4), r(5)], [r(6), E]]
+        A = [[L1, L2], x["bA"]]
+        self.assertEqual(proof, [[A, x["B"]], E])      # Root = [[A B] E]
         self.assertTrue(verify_range(1, 5, records, proof, self.root))
 
     def test_range_9_12_matches_hand_answer(self):
-        """4 hashes: a_A, h7, h14, b_L5 (the MB-tree needs 6)."""
-        x, r = emb_toy_hashes(), self.rec
+        """4 real hashes: a_A, h7, h14, b_L5 (the MB-tree needs 6), plus EMPTY slots."""
+        x, r, E = emb_toy_hashes(), self.rec, EMPTY
         records, proof = self.tree.read_range(9, 12)
-        A = [x["aA"], [[[x["h"][7], r(8)], [r(9)]]]]
-        B = [[[r(10), r(11)], [r(12)]], [[r(13), x["h"][14]], x["bL5"]]]
-        self.assertEqual(proof, [A, B])
+        L3 = [[x["h"][7], r(8)], [r(9), E]]
+        A = [x["aA"], [L3, E]]                          # A = [L1 L2 | L3 E]
+        L4 = [[r(10), r(11)], [r(12), E]]
+        L5 = [[r(13), x["h"][14]], x["bL5"]]
+        B = [[L4, L5], E]                               # B = [L4 L5 | E E]
+        self.assertEqual(proof, [[A, B], E])            # Root = [A B | E E]
         self.assertTrue(verify_range(9, 12, records, proof, self.root))
 
     def test_random_ranges_other_fk(self):
@@ -909,9 +959,15 @@ class TestBothTreesAgree(unittest.TestCase):
                     key = rng.randint(0, 800)  # small key space: duplicates and misses happen
                     if op < 0.4:
                         value = f"value-{key}-s{step}"
+                        mb_root, emb_root = mb.root_hash, emb.root_hash
                         a = outcome(lambda: mb.insert(key, value))
                         b = outcome(lambda: emb.insert(key, value))
-                        self.assertEqual(a, b)
+                        self.assertEqual(a[0], b[0])
+                        if a[0] == "ok":   # the returned non-membership proofs check out
+                            self.assertTrue(verify_read(key, None, a[1], mb_root))
+                            self.assertTrue(verify_read(key, None, b[1], emb_root))
+                        else:
+                            self.assertEqual(a, b)   # the same error on both trees
                         truth.setdefault(key, value)
                     elif op < 0.6:
                         value = f"value-{key}-u{step}"
@@ -935,9 +991,129 @@ class TestBothTreesAgree(unittest.TestCase):
                         self.assertTrue(verify_range(low, high, ra, pa, mb.root_hash))
                         self.assertTrue(verify_range(low, high, rb, pb, emb.root_hash))
                 self.assertEqual(mb.levels(), emb.levels())  # same B+ tree shape underneath
-                self.assertEqual(len(mb), len(truth))
-                mb.check_hashes()
-                emb.check_hashes()
+                self.assertEqual(mb.size, len(truth))
+                check_hashes(mb)
+                check_hashes(emb)
+
+
+# ======================= Kartick's feedback: non-membership =======================
+
+def shown_keys(proof):
+    """The keys of the records shown in a range / non-membership proof."""
+    return [x[0] for x in positions_items(proof) if isinstance(x, tuple)]
+
+
+class TestNonMembership(unittest.TestCase):
+    """Every place where a missing key can be (keys 10, 20, ..., 160, fanout 4):
+        Root [100]; A [40|70], B [130];
+        leaves [10 20 30] [40 50 60] [70 80 90] [100 110 120] [130 140 150 160]"""
+    CASES = {
+        "smaller than every key": (5, [10]),
+        "larger than every key": (999, [160]),
+        "same leaf, same small-tree group": (15, [10, 20]),
+        "same leaf, different small-tree groups": (25, [20, 30]),
+        "neighbouring leaves with the same parent": (35, [30, 40]),
+        "neighbouring leaves under different parents": (95, [90, 100]),
+    }
+
+    def trees(self):
+        trees = [MBTree(4), EMBTree(4, fk=2)]
+        for tree in trees:
+            for k in range(10, 170, 10):
+                tree.insert(k, f"v{k}")
+        return trees
+
+    def test_shape(self):
+        for tree in self.trees():
+            self.assertEqual(tree.levels(), [[[100]], [[40, 70], [130]],
+                                             [[10, 20, 30], [40, 50, 60], [70, 80, 90],
+                                              [100, 110, 120], [130, 140, 150, 160]]])
+
+    def test_every_case_is_proven(self):
+        for tree in self.trees():
+            for name, (key, neighbours) in self.CASES.items():
+                with self.subTest(tree=type(tree).__name__, case=name):
+                    value, proof = tree.read(key)
+                    self.assertIsNone(value)
+                    self.assertTrue(verify_read(key, None, proof, tree.root_hash))
+                    self.assertEqual(shown_keys(proof), neighbours)  # exactly the neighbours
+
+    def test_empty_tree(self):
+        for tree in (MBTree(4), EMBTree(4, fk=2)):
+            value, proof = tree.read(5)
+            self.assertIsNone(value)
+            self.assertTrue(verify_read(5, None, proof, tree.root_hash))
+            self.assertEqual(shown_keys(proof), [])
+
+    def test_signpost_keys_are_members(self):
+        """Without delete every signpost is a real key, so it is never a non-membership case."""
+        for tree in self.trees():
+            for k in (40, 70, 100, 130):
+                value, proof = tree.read(k)
+                self.assertEqual(value, f"v{k}")
+                self.assertFalse(verify_read(k, None, proof, tree.root_hash))
+
+    def test_false_non_membership_rejected(self):
+        """For a key that exists, no proof convinces the client that it is missing."""
+        for tree in self.trees():
+            for k in range(10, 170, 10):
+                for other in (5, 95, 999):
+                    _, proof = tree.read(other)   # a real non-membership proof, for another key
+                    self.assertFalse(verify_read(k, None, proof, tree.root_hash))
+                _, proof = tree.read_range(k, k)  # the honest range proof shows k itself
+                self.assertFalse(verify_read(k, None, proof, tree.root_hash))
+
+
+class TestInsertProof(unittest.TestCase):
+    """insert() first proves the key is not in the tree yet (non-membership proof)."""
+
+    def test_every_insert_returns_a_valid_proof(self):
+        rng = random.Random(31)
+        for tree in (MBTree(4), EMBTree(4, fk=2), MBTree(8), EMBTree(8, fk=2)):
+            for k in rng.sample(range(10_000), 300):
+                old_root = tree.root_hash
+                proof = tree.insert(k, f"v{k}")
+                self.assertTrue(verify_read(k, None, proof, old_root))        # absent before
+                self.assertFalse(verify_read(k, None, proof, tree.root_hash))  # not after
+
+
+class TestEmptySlots(unittest.TestCase):
+    """EMPTY slots are skipped by the completeness check, so make sure a server cannot
+    use them to hide anything."""
+
+    def setUp(self):
+        self.tree = EMBTree(4, fk=2)
+        for k, v in TOY16.items():
+            self.tree.insert(k, v)
+        self.root = self.tree.root_hash
+
+    def test_cannot_hide_with_empty(self):
+        records, proof = self.tree.read_range(9, 12)
+        for where in positions(proof):
+            item = get_at(proof, where)
+            if item == EMPTY:
+                continue
+            bad = replaced(proof, where, EMPTY)   # a record, a hash or a subtree becomes "empty"
+            self.assertFalse(verify_range(9, 12, records, bad, self.root))
+            self.assertFalse(verify_range(9, 12, [r for r in records if r != item], bad, self.root))
+
+    def test_cannot_add_or_remove_empty(self):
+        records, proof = self.tree.read_range(9, 12)
+        for where in positions(proof):
+            if get_at(proof, where) == EMPTY:
+                self.assertFalse(verify_range(9, 12, records, removed(proof, where), self.root))
+            bad = copy.deepcopy(proof)
+            (get_at(bad, where[:-1]) if len(where) > 1 else bad).insert(where[-1], EMPTY)
+            self.assertFalse(verify_range(9, 12, records, bad, self.root))
+
+    def test_mb_proofs_do_not_accept_empty(self):
+        mb = MBTree(4)
+        for k, v in TOY16.items():
+            mb.insert(k, v)
+        records, proof = mb.read_range(9, 12)
+        bad = copy.deepcopy(proof)
+        bad[0].append(EMPTY)
+        self.assertFalse(verify_range(9, 12, records, bad, mb.root_hash))
 
 
 if __name__ == "__main__":

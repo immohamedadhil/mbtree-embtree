@@ -1,15 +1,16 @@
 """The 16-key toy example (from the email), on both trees.
 
-Shows insert, read, read_range and update, and checks every proof the way a
-client would: with only the answer, the proof and the owner's trusted root.
-It also shows that tampered answers are rejected.
+Shows insert (with its non-membership proof), read, read_range and update,
+and checks every proof the way a client would: with only the answer, the proof
+and the owner's trusted root. It also shows every kind of missing-key proof and
+that tampered answers are rejected.
 
 Run:  python demo_toy16.py      (exit code 0 = every check passed)
 """
 import sys
 
 from embtree import EMBTree
-from hashing import record_hash
+from hashing import EMPTY, record_hash
 from mbtree import MBTree
 from verify import verify_range, verify_read
 
@@ -26,7 +27,7 @@ def check(label, ok):
 
 
 def short(h):
-    return h.hex()[:6]
+    return "E" if h == EMPTY else h.hex()[:6]  # E = an empty slot (32 zero bytes)
 
 
 def show_read_proof(proof):
@@ -43,23 +44,47 @@ def show_range_proof(node):
     return "[" + " ".join(show_range_proof(x) for x in node) + "]"
 
 
-def count_hashes(proof):
-    if isinstance(proof, bytes):
-        return 1
-    if isinstance(proof, tuple) and len(proof) == 2 and isinstance(proof[0], list):
-        return len(proof[0]) + len(proof[1])  # one step of a read proof
-    if isinstance(proof, tuple):
-        return 0  # a record
-    return sum(count_hashes(x) for x in proof)
+def read_proof_hashes(proof):
+    """Every hash in a read proof."""
+    hashes = []
+    for left, right in proof:
+        hashes += left + right
+    return hashes
+
+
+def range_proof_items(node):
+    """Every hash and record inside a range proof, in order."""
+    items = []
+    for x in node:
+        if isinstance(x, list):
+            items += range_proof_items(x)
+        else:
+            items.append(x)
+    return items
+
+
+def size(hashes):
+    """'6 hashes (2 of them E)' for a list of hashes."""
+    empty = hashes.count(EMPTY)
+    if empty:
+        return f"{len(hashes)} hashes ({empty} of them E)"
+    return f"{len(hashes)} hashes"
 
 
 def hide_record(node, key):
     """Copy of a range proof with one shown record replaced by its (honest) hash."""
     if isinstance(node, tuple):
-        return record_hash(*node) if node[0] == key else node
+        if node[0] == key:
+            return record_hash(node[0], node[1])
+        return node
     if isinstance(node, list):
         return [hide_record(x, key) for x in node]
     return node
+
+
+def print_shape(tree):
+    for level in tree.levels():
+        print("      " + " ".join(str(keys) for keys in level))
 
 
 def section(title):
@@ -70,13 +95,16 @@ def main():
     trees = {"MB-tree  (fanout 4)": MBTree(4), "EMB-tree (fanout 4, f_k 2)": EMBTree(4, fk=2)}
 
     section("insert(1..16): keys in ascending order, toy names as values")
+    proofs_ok = True
     for key, toy in enumerate(TOYS, start=1):
         for tree in trees.values():
-            tree.insert(key, toy)
+            old_root = tree.root_hash
+            proof = tree.insert(key, toy)   # first proves the key is new, then inserts
+            proofs_ok &= verify_read(key, None, proof, old_root)
+    check("all 32 inserts came with a valid non-membership proof", proofs_ok)
     mb, emb = trees.values()
     print("   B+ tree shape (the same for both trees):")
-    for line in str(mb).splitlines():
-        print("     ", line)
+    print_shape(mb)
     check("both trees have the same shape", mb.levels() == emb.levels())
     roots = {}
     for name, tree in trees.items():
@@ -87,7 +115,7 @@ def main():
     for key in (2, 14):
         for name, tree in trees.items():
             value, proof = tree.read(key)
-            print(f"   {name}  read({key}) = {value!r}, {count_hashes(proof)} hashes: {show_read_proof(proof)}")
+            print(f"   {name}  read({key}) = {value!r}, {size(read_proof_hashes(proof))}: {show_read_proof(proof)}")
             check(f"client accepts read({key})", verify_read(key, value, proof, roots[name]))
     for name, tree in trees.items():
         value, proof = tree.read(99)
@@ -98,8 +126,8 @@ def main():
     for low, high in ((1, 5), (9, 12), (17, 20)):
         for name, tree in trees.items():
             records, proof = tree.read_range(low, high)
-            print(f"   {name}  read_range({low}, {high}) -> keys {[k for k, _ in records]}, "
-                  f"{count_hashes(proof)} hashes")
+            hashes = [x for x in range_proof_items(proof) if isinstance(x, bytes)]
+            print(f"   {name}  read_range({low}, {high}) -> keys {[k for k, _ in records]}, {size(hashes)}")
             print(f"      proof: {show_range_proof(proof)}")
             check(f"client accepts the range ({low}, {high}) as correct and complete",
                   verify_range(low, high, records, proof, roots[name]))
@@ -116,15 +144,34 @@ def main():
               not verify_read(5, old_value, old_proof, new_root))
         roots[name] = new_root
 
-    section("insert(17, 'kazoo'): the last leaf splits")
+    section("insert(17, 'kazoo'): non-membership proof first, then the last leaf splits")
     for name, tree in trees.items():
-        tree.insert(17, "kazoo")
+        proof = tree.insert(17, "kazoo")
+        check(f"{name}: proof that 17 was new, against the old root",
+              verify_read(17, None, proof, roots[name]))
         roots[name] = tree.root_hash
         value, proof = tree.read(17)
         check(f"{name}: read(17) accepted", verify_read(17, value, proof, roots[name]))
     print("   new shape:")
-    for line in str(mb).splitlines():
-        print("     ", line)
+    print_shape(mb)
+
+    section("proof that a key is missing: every case (keys 10, 20, ..., 160)")
+    cases = [("smaller than every key", 5), ("larger than every key", 999),
+             ("same leaf, same small-tree group", 15), ("same leaf, different groups", 25),
+             ("neighbouring leaves, same parent", 35), ("leaves under different parents", 95)]
+    for name, tree_class in (("MB-tree", MBTree), ("EMB-tree", EMBTree)):   # fanout 4 (EMB-tree: f_k = 2)
+        gapped = tree_class(4)
+        for k in range(10, 170, 10):
+            gapped.insert(k, f"v{k}")
+        print(f"   {name}")
+        for label, key in cases:
+            value, proof = gapped.read(key)
+            shown = [x[0] for x in range_proof_items(proof) if isinstance(x, tuple)]
+            check(f"{label:34s} read({key}) = None, neighbours shown: {shown}",
+                  value is None and verify_read(key, None, proof, gapped.root_hash))
+        empty = tree_class(4)
+        value, proof = empty.read(5)
+        check("empty tree: read(5) = None", value is None and verify_read(5, None, proof, empty.root_hash))
 
     section("a cheating server is caught")
     for name, tree in trees.items():

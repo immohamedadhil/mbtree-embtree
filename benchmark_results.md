@@ -5,88 +5,94 @@
 - timings move by tens of percent between runs on a laptop, so only large differences mean something; proof sizes are exact
 - Python 3.14.0 on Windows-11-10.0.26300-SP0
 
-## Fanout 8 (EMB-tree: f_e = 8, f_k = 2); tree height MB 6, EMB 6
+## Fanout 8 (EMB-tree: f_e = 8, f_k = 2, 8 slots per node); tree height MB 6, EMB 6
 
 | Measurement (µs per operation) | MB-tree | EMB-tree |
 |---|---:|---:|
-| Insert (per record) | 33.8 | 126.3 |
-| Read: lookup only | 3.2 | 3.6 |
-| Read: full read() incl. proof | 12.7 | 23.0 |
-| Proof generation (read) | 9.5 | 18.7 |
-| Verification (read) | 38.7 | 73.8 |
-| Range read: lookup only | 24.1 | 23.8 |
-| Range read: full read_range() incl. proof | 77.6 | 237.5 |
-| Proof generation (range) | 53.6 | 213.7 |
-| Verification (range) | 304.3 | 469.0 |
-| Update | 37.4 | 64.6 |
+| Insert (per record, incl. its non-membership proof) | 63.4 | 218.5 |
+| Read: lookup only | 4.5 | 3.9 |
+| Read: full read() incl. proof | 14.8 | 28.9 |
+| Proof generation (read) | 9.2 | 24.8 |
+| Verification (read) | 48.9 | 91.7 |
+| Range read: lookup only | 26.9 | 27.2 |
+| Range read: full read_range() incl. proof | 82.5 | 154.2 |
+| Proof generation (range) | 63.9 | 126.6 |
+| Verification (range) | 360.9 | 646.5 |
+| Update | 36.4 | 97.6 |
 
 | Proof size (average) | MB-tree | EMB-tree |
 |---|---:|---:|
-| read: hashes | 25.0 | 14.1 |
-| read: hash bytes | 799 | 453 |
-| read: total bytes incl. records | 822 | 476 |
-| range (50 records + 2 boundary): hashes | 25.1 | 14.3 |
-| range (50 records + 2 boundary): hash bytes | 802 | 456 |
-| range (50 records + 2 boundary): total bytes incl. records | 1,993 | 1,648 |
+| read: hashes | 25.0 | 18.0 |
+| read: of which empty slots (E) | 0.0 | 3.9 |
+| read: hash bytes | 799 | 576 |
+| read: total bytes incl. records | 825 | 602 |
+| range (50 records + 2 boundary): hashes | 25.1 | 30.7 |
+| range (50 records + 2 boundary): of which empty slots (E) | 0.0 | 16.5 |
+| range (50 records + 2 boundary): hash bytes | 802 | 983 |
+| range (50 records + 2 boundary): total bytes incl. records | 2,145 | 2,327 |
 
 Both trees gave identical answers; every proof was verified.
 
-## Fanout 32 (EMB-tree: f_e = 32, f_k = 2); tree height MB 3, EMB 3
+## Fanout 32 (EMB-tree: f_e = 32, f_k = 2, 32 slots per node); tree height MB 3, EMB 3
 
 | Measurement (µs per operation) | MB-tree | EMB-tree |
 |---|---:|---:|
-| Insert (per record) | 32.6 | 206.3 |
-| Read: lookup only | 2.2 | 2.3 |
-| Read: full read() incl. proof | 10.0 | 18.2 |
-| Proof generation (read) | 7.3 | 15.9 |
-| Verification (read) | 47.8 | 69.3 |
-| Range read: lookup only | 19.4 | 20.1 |
-| Range read: full read_range() incl. proof | 59.3 | 157.9 |
-| Proof generation (range) | 39.9 | 135.9 |
-| Verification (range) | 296.2 | 456.0 |
-| Update | 32.3 | 56.9 |
+| Insert (per record, incl. its non-membership proof) | 59.3 | 491.7 |
+| Read: lookup only | 2.5 | 2.7 |
+| Read: full read() incl. proof | 11.1 | 29.1 |
+| Proof generation (read) | 8.3 | 26.4 |
+| Verification (read) | 56.4 | 104.4 |
+| Range read: lookup only | 22.9 | 45.8 |
+| Range read: full read_range() incl. proof | 89.6 | 100.5 |
+| Proof generation (range) | 58.3 | 71.6 |
+| Verification (range) | 345.9 | 726.6 |
+| Update | 36.2 | 90.0 |
 
 | Proof size (average) | MB-tree | EMB-tree |
 |---|---:|---:|
-| read: hashes | 64.3 | 14.2 |
-| read: hash bytes | 2,056 | 455 |
-| read: total bytes incl. records | 2,079 | 478 |
-| range (50 records + 2 boundary): hashes | 63.5 | 14.2 |
-| range (50 records + 2 boundary): hash bytes | 2,031 | 454 |
-| range (50 records + 2 boundary): total bytes incl. records | 3,223 | 1,646 |
+| read: hashes | 64.3 | 15.0 |
+| read: of which empty slots (E) | 0.0 | 0.8 |
+| read: hash bytes | 2,056 | 480 |
+| read: total bytes incl. records | 2,082 | 506 |
+| range (50 records + 2 boundary): hashes | 63.5 | 20.4 |
+| range (50 records + 2 boundary): of which empty slots (E) | 0.0 | 6.2 |
+| range (50 records + 2 boundary): hash bytes | 2,031 | 651 |
+| range (50 records + 2 boundary): total bytes incl. records | 3,374 | 1,995 |
 
 Both trees gave identical answers; every proof was verified.
 
-## Fanout 128 (EMB-tree: f_e = 128, f_k = 2); tree height MB 2, EMB 2
+## Fanout 128 (EMB-tree: f_e = 128, f_k = 2, 128 slots per node); tree height MB 2, EMB 2
 
 | Measurement (µs per operation) | MB-tree | EMB-tree |
 |---|---:|---:|
-| Insert (per record) | 47.3 | 481.4 |
-| Read: lookup only | 2.0 | 2.0 |
-| Read: full read() incl. proof | 13.2 | 17.4 |
-| Proof generation (read) | 11.2 | 14.5 |
-| Verification (read) | 99.0 | 65.5 |
-| Range read: lookup only | 18.7 | 18.7 |
-| Range read: full read_range() incl. proof | 72.6 | 141.2 |
-| Proof generation (range) | 53.9 | 122.4 |
-| Verification (range) | 386.4 | 454.1 |
-| Update | 58.3 | 53.7 |
+| Insert (per record, incl. its non-membership proof) | 81.0 | 1052.4 |
+| Read: lookup only | 3.1 | 2.1 |
+| Read: full read() incl. proof | 14.9 | 17.3 |
+| Proof generation (read) | 12.6 | 15.3 |
+| Verification (read) | 120.3 | 78.6 |
+| Range read: lookup only | 25.7 | 20.1 |
+| Range read: full read_range() incl. proof | 58.7 | 112.4 |
+| Proof generation (range) | 37.7 | 80.6 |
+| Verification (range) | 508.9 | 624.8 |
+| Update | 75.9 | 100.6 |
 
 | Proof size (average) | MB-tree | EMB-tree |
 |---|---:|---:|
-| read: hashes | 201.3 | 13.6 |
-| read: hash bytes | 6,441 | 435 |
-| read: total bytes incl. records | 6,464 | 458 |
-| range (50 records + 2 boundary): hashes | 202.6 | 13.6 |
-| range (50 records + 2 boundary): hash bytes | 6,482 | 436 |
-| range (50 records + 2 boundary): total bytes incl. records | 7,673 | 1,628 |
+| read: hashes | 201.3 | 14.0 |
+| read: of which empty slots (E) | 0.0 | 0.4 |
+| read: hash bytes | 6,441 | 448 |
+| read: total bytes incl. records | 6,467 | 474 |
+| range (50 records + 2 boundary): hashes | 202.6 | 15.7 |
+| range (50 records + 2 boundary): of which empty slots (E) | 0.0 | 2.1 |
+| range (50 records + 2 boundary): hash bytes | 6,482 | 504 |
+| range (50 records + 2 boundary): total bytes incl. records | 7,825 | 1,847 |
 
 Both trees gave identical answers; every proof was verified.
 
-## Summary: average hashes per proof
+## Summary: average hashes per proof (EMB-tree: of which empty slots)
 
 | Fanout | Read: MB | Read: EMB | Range: MB | Range: EMB |
 |---:|---:|---:|---:|---:|
-| 8 | 25.0 | 14.1 | 25.1 | 14.3 |
-| 32 | 64.3 | 14.2 | 63.5 | 14.2 |
-| 128 | 201.3 | 13.6 | 202.6 | 13.6 |
+| 8 | 25.0 | 18.0 (3.9 E) | 25.1 | 30.7 (16.5 E) |
+| 32 | 64.3 | 15.0 (0.8 E) | 63.5 | 20.4 (6.2 E) |
+| 128 | 201.3 | 14.0 (0.4 E) | 202.6 | 15.7 (2.1 E) |

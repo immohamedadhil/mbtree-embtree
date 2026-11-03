@@ -1,16 +1,22 @@
 """Embedded Merkle B-tree (EMB-tree), paper Section 3.3.
 
-The same B+ tree (external fanout f_e = `fanout`), but inside every node there
-is a small Merkle tree with fanout f_k (`fk`) built over the node's entry
-hashes. The root of that small tree is the node's hash, used by its parent.
+The same B+ tree as the MB-tree (external fanout f_e = `fanout`), but inside
+every node there is a small Merkle tree with fanout f_k (`fk`) built over the
+node's entry hashes. The root of that small tree is the node's hash, used by
+its parent. So the EMB-tree is the MB-tree with four changes, all about one
+node: how it is hashed, how it is updated, and how it is shown in a read proof
+and in a range proof. Everything else (search, insert, splits) is shared.
 
-Shape of the small tree (assumption A1; the paper assumes full nodes and leaves
-the general case open): take the entry hashes f_k at a time from the left, hash
-each group (even a group of one), and repeat until one hash is left.
-For f_k >= f_e there is a single group, so every node hash equals the MB-tree's
-(paper: "the authentication cost becomes equal to that of an MB-tree").
+Nodes that are not full: the paper assumes full nodes. As suggested by the task
+reviewer, the empty places are filled with a fixed value, EMPTY = 32 zero bytes.
+Each node's small tree has `slots` places (the smallest power of f_k that holds
+f_e entries), so every group is full and every small tree has the same shape:
+d_k = log_fk(slots) levels and exactly f_k - 1 hashes per level in a proof, as
+in the paper's cost model. A group made only of EMPTY slots is itself EMPTY.
+For f_k >= f_e there is no small tree (the paper discards it): the node is
+hashed exactly like an MB-tree node.
 
-The small tree is stored in the node (`levels`).
+The small tree is stored in the node (`small_tree`, a list of levels).
 - update: only the changed entry's path through each small tree on the way to
   the root is recomputed (paper Section 4.3).
 - insert: the small trees of the changed nodes are rebuilt, because a new entry
@@ -18,180 +24,108 @@ The small tree is stored in the node (`levels`).
 
 Proofs use the same formats as the MB-tree, so verify.py checks both trees.
 """
-from bisect import bisect_right
-
-from bptree import BPlusTree, Inner, Leaf
-from hashing import node_hash, record_hash
+from hashing import EMPTY, node_hash
+from mbtree import MBTree, entry_hashes
 
 
-def build_levels(entry_hashes, fk):
-    """A node's small tree: levels[0] = the entry hashes, levels[-1] = [the node's hash]."""
-    levels = [list(entry_hashes)]
-    while len(levels) == 1 or len(levels[-1]) > 1:
+def slots_for(fanout, fk):
+    """Places in a node's small tree: the smallest power of fk that holds `fanout`
+    entries, or None when fk >= fanout (no small tree)."""
+    if fk >= fanout:
+        return None
+    slots = fk
+    while slots < fanout:
+        slots *= fk
+    return slots
+
+
+def group_hash(members):
+    """A group of only EMPTY slots stays EMPTY; any other group is hashed as a node."""
+    if all(m == EMPTY for m in members):
+        return EMPTY
+    return node_hash(members)
+
+
+def build_small_tree(entry_hashes, fk, slots):
+    """A node's small tree, as a list of levels: the first level is the entry
+    hashes padded with EMPTY up to `slots`; the last level is [the node's hash]."""
+    entries = list(entry_hashes)
+    if slots is None:  # fk >= fanout: one group, exactly the MB-tree's node hash
+        return [entries, [node_hash(entries)]]
+    assert len(entries) <= slots, "more entries than slots"
+    levels = [entries + [EMPTY] * (slots - len(entries))]
+    while len(levels[-1]) > 1:
         below = levels[-1]
-        groups = [node_hash(below[i:i + fk]) for i in range(0, len(below), fk)]
-        levels.append(groups or [node_hash([])])  # an empty tree: same root as the MB-tree
+        above = []
+        for start in range(0, len(below), fk):
+            above.append(group_hash(below[start:start + fk]))
+        levels.append(above)
     return levels
 
 
-class EMBLeaf(Leaf):
-    __slots__ = ("levels",)
-
-    def __init__(self, keys, values):
-        super().__init__(keys, values)
-        self.levels = [[]]  # levels[0][i] = H(record i); the levels above are the small tree
-
-    @property
-    def digest(self):
-        return self.levels[-1][0]
-
-
-class EMBInner(Inner):
-    __slots__ = ("levels",)
-
-    def __init__(self, keys, children):
-        super().__init__(keys, children)
-        self.levels = [[]]  # levels[0][i] = hash of child i; the levels above are the small tree
-
-    @property
-    def digest(self):
-        return self.levels[-1][0]
-
-
-class EMBTree(BPlusTree):
-    leaf_class = EMBLeaf
-    inner_class = EMBInner
+class EMBTree(MBTree):
 
     def __init__(self, fanout=4, fk=2):
         if fk < 2:
             raise ValueError("fk must be at least 2")
-        super().__init__(fanout)
+        # set before MBTree.__init__, which already hashes the (empty) root
         self.fk = fk
-        self.root.levels = build_levels([], fk)
+        self.slots = slots_for(fanout, fk)
+        super().__init__(fanout)
 
-    @property
-    def root_hash(self):
-        return self.root.digest
+    # ---------- the four changes ----------
 
-    # ---------- authenticated read (the server's side) ----------
+    def _rehash(self, node):
+        """Rebuild the node's small tree from its entries; its top is the node's hash."""
+        node.small_tree = build_small_tree(entry_hashes(node), self.fk, self.slots)
+        node.digest = node.small_tree[-1][0]
 
-    def read(self, key):
-        """Return (value, proof).
-
-        Same proof format as the MB-tree: [(left_hashes, right_hashes), ...],
-        bottom-up. Here every node adds one step per level of its small tree,
-        each with at most f_k - 1 hashes (paper: (f_k - 1) * d_k per node).
-        Key missing (assumption A4): (None, the range proof for [key, key]),
-        which proves the key is absent.
-        """
-        path, leaf, i = self._locate(key)
-        if i is None:
-            return None, self.read_range(key, key)[1]
-        proof = self._steps_in_node(leaf, i)
-        for node, j in reversed(path):  # leaf's parent first, root last
-            proof += self._steps_in_node(node, j)
-        return leaf.values[i], proof
-
-    def _steps_in_node(self, node, i):
-        """The path from entry i up through the node's small tree."""
-        steps = []
-        for level in node.levels[:-1]:
-            start = i - i % self.fk  # first member of i's group
-            group = level[start:start + self.fk]
-            steps.append((group[:i - start], group[i - start + 1:]))
-            i //= self.fk  # the group's position one level up
-        return steps
-
-    def read_range(self, low, high):
-        """Return (records, proof) for all records with low <= key <= high.
-
-        Same proof format as the MB-tree (nested lists of hashes, records and
-        shown children). Inside each shown node, the small tree is shown the
-        same way: groups holding no shown entry are replaced by their hash.
-        """
-        records, first, last = self._range_span(low, high)
-        return records, self._range_proof(self.root, first, last)
-
-    def _range_proof(self, node, first, last):
-        if isinstance(node, Leaf):
-            shown = [i for i, k in enumerate(node.keys) if first <= k <= last]
-            lo, hi = (shown[0], shown[-1]) if shown else (0, -1)
-            return self._small_tree_proof(node, lo, hi, lambda i: (node.keys[i], node.values[i]))
-        lo = bisect_right(node.keys, first)  # the two walks pass through children lo..hi
-        hi = bisect_right(node.keys, last)
-        return self._small_tree_proof(
-            node, lo, hi, lambda i: self._range_proof(node.children[i], first, last))
-
-    def _small_tree_proof(self, node, lo, hi, shown_item):
-        """The node's small tree, with entries lo..hi shown (as shown_item(i)) and
-        every group that holds none of them replaced by its hash."""
-        fk = self.fk
-        levels = node.levels
-
-        def group(d, g):
-            # Group g on level d is made of positions g*fk ... on level d-1; each
-            # of those positions covers `span` entries of the node.
-            span = fk ** (d - 1)
-            members = []
-            for p in range(g * fk, min(g * fk + fk, len(levels[d - 1]))):
-                if p * span > hi or (p + 1) * span <= lo:
-                    members.append(levels[d - 1][p])  # no shown entry below: just its hash
-                elif d == 1:
-                    members.append(shown_item(p))
-                else:
-                    members.append(group(d - 1, p))
-            return members
-
-        return group(len(levels) - 1, 0)
-
-    # ---------- keeping the hashes up to date ----------
-
-    def _put_record(self, leaf, i, key, value):
-        super()._put_record(leaf, i, key, value)
-        leaf.levels[0].insert(i, record_hash(key, value))  # the only record hashed on insert
-
-    def _split_leaf(self, leaf):
-        signpost, right = super()._split_leaf(leaf)
-        keep = len(leaf.keys)  # the record hashes move with their records
-        right.levels = [leaf.levels[0][keep:]]
-        del leaf.levels[0][keep:]
-        return signpost, right
-
-    def _after_insert(self, changed):
-        for node in changed:  # bottom-up, so children are ready before their parent
-            if isinstance(node, Leaf):
-                entries = node.levels[0]
-            else:
-                entries = [child.digest for child in node.children]
-            node.levels = build_levels(entries, self.fk)
-
-    def _after_update(self, path, leaf, i):
-        self._set_entry(leaf, i, record_hash(leaf.keys[i], leaf.values[i]))
+    def _update_hashes(self, path, leaf, i):
+        """Paper Section 4.3: after record i of `leaf` changed, recompute only the
+        path up each small tree, from the leaf to the root."""
+        self._set_entry(leaf, i, leaf.hashes[i])
         child = leaf
         for node, j in reversed(path):  # leaf's parent first, root last
             self._set_entry(node, j, child.digest)
             child = node
 
+    def _steps_in_node(self, node, i):
+        """Read-proof steps for entry i: one step per level of the small tree, each
+        with the other members of i's group (f_k - 1 hashes; paper: (f_k - 1) * d_k)."""
+        steps = []
+        for level in node.small_tree[:-1]:
+            start = i - i % self.fk  # first member of i's group
+            group = level[start:start + self.fk]
+            steps.append((group[:i - start], group[i - start + 1:]))
+            i = i // self.fk  # the group's position one level up
+        return steps
+
+    def _show_in_node(self, node, lo, hi, shown):
+        """The node's small tree as a range-proof list, with entries lo..hi shown.
+        Going up one level at a time, every group that holds a shown entry is
+        opened (a list of its members); every other group stays a hash (EMPTY for
+        a group of only empty slots)."""
+        fk = self.fk
+        levels = node.small_tree
+        for level in levels[:-2]:  # every level below the top group
+            group_lo, group_hi = lo // fk, hi // fk  # the groups that get opened
+            # their members, in order: hashes, the shown part, hashes
+            members = level[group_lo * fk:lo] + shown + level[hi + 1:(group_hi + 1) * fk]
+            shown = []
+            for start in range(0, len(members), fk):
+                shown.append(members[start:start + fk])
+            lo, hi = group_lo, group_hi
+        top_group = levels[-2]
+        return top_group[:lo] + shown + top_group[hi + 1:]
+
+    # ---------- helper ----------
+
     def _set_entry(self, node, i, h):
         """Give entry i a new hash; recompute only its path up the node's small tree."""
-        levels = node.levels
+        levels = node.small_tree
         levels[0][i] = h
         for d in range(1, len(levels)):
-            i //= self.fk
+            i = i // self.fk
             start = i * self.fk
-            levels[d][i] = node_hash(levels[d - 1][start:start + self.fk])
-
-    # ---------- checking (used by tests) ----------
-
-    def check_hashes(self):
-        """Recompute every small tree from the records alone; raise AssertionError if any stored hash differs."""
-        def expected(node):
-            if isinstance(node, Leaf):
-                entries = [record_hash(k, v) for k, v in zip(node.keys, node.values)]
-            else:
-                entries = [expected(child) for child in node.children]
-            levels = build_levels(entries, self.fk)
-            assert node.levels == levels, "stale hash in a node's small tree"
-            return levels[-1][0]
-
-        expected(self.root)
+            levels[d][i] = group_hash(levels[d - 1][start:start + self.fk])
+        node.digest = levels[-1][0]

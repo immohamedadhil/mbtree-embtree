@@ -12,6 +12,7 @@ import hashlib
 HASH_SIZE = 32  # bytes in one SHA-256 hash
 RECORD_TAG = b"\x00"
 NODE_TAG = b"\x01"
+EMPTY = bytes(HASH_SIZE)  # an empty slot in an EMB-tree node: 32 zero (NULL) bytes
 
 
 def H(data):
@@ -21,12 +22,12 @@ def H(data):
 def encode_record(key, value):
     """Turn a record into bytes, the same way every time.
 
-    key:   signed big-endian integer (any size, also negative), with its length in front
+    key:   written as decimal text (353 -> "353", -5 -> "-5"), with its length in front
     value: UTF-8 text, with its length in front
     The lengths make the bytes unambiguous: two different records never give the
-    same bytes (without them, (353, "b") and (1, "ab") would both be 01 61 62).
+    same bytes (without them, (1, "23") and (12, "3") would both be "123").
     """
-    k = key.to_bytes((key.bit_length() + 8) // 8, "big", signed=True)
+    k = str(key).encode("utf-8")
     v = value.encode("utf-8")
     return len(k).to_bytes(4, "big") + k + len(v).to_bytes(4, "big") + v
 
