@@ -1,9 +1,10 @@
 """The 16-key toy example (from the email), on both trees.
 
-Shows insert (with its non-membership proof), read, read_range and update,
-and checks every proof the way a client would: with only the answer, the proof
-and the owner's trusted root. It also shows every kind of missing-key proof and
-that tampered answers are rejected.
+Builds the tree from keys 1..16, then shows read(14), read_range(5, 9),
+update(14) and insert(17) (with its non-membership proof), and checks every
+proof the way a client would: with only the answer, the proof and the owner's
+trusted root. It also shows every kind of missing-key proof and that tampered
+answers are rejected.
 
 Run:  python demo_toy16.py      (exit code 0 = every check passed)
 """
@@ -17,31 +18,18 @@ from verify import verify_range, verify_read
 TOYS = ["ball", "car", "doll", "kite", "yo-yo", "puzzle", "drum", "train",
         "blocks", "teddy", "top", "whistle", "marbles", "jump rope", "rattle", "bubbles"]
 
-failures = []
+results = []  # every check, True or False
 
 
-def check(label, ok):
-    print(f"      {'ok  ' if ok else 'FAIL'}  {label}")
-    if not ok:
-        failures.append(label)
+def mark(*checks):
+    """Record one or more checks; return '[ok]' only if all of them passed."""
+    results.extend(checks)
+    return "[ok]" if all(checks) else "[FAIL]"
 
 
-def short(h):
-    return "E" if h == EMPTY else h.hex()[:6]  # E = an empty slot (32 zero bytes)
-
-
-def show_read_proof(proof):
-    """One [left * right] group per step; * is where the client's own hash goes."""
-    return " ".join("[" + " ".join([short(h) for h in left] + ["*"] + [short(h) for h in right]) + "]"
-                    for left, right in proof)
-
-
-def show_range_proof(node):
-    if isinstance(node, bytes):
-        return short(node)
-    if isinstance(node, tuple):
-        return str(node[0])  # a shown record, by its key
-    return "[" + " ".join(show_range_proof(x) for x in node) + "]"
+def section(number, title, what):
+    print(f"\n{number}. {title}")
+    print(f"   {what}\n")
 
 
 def read_proof_hashes(proof):
@@ -64,11 +52,16 @@ def range_proof_items(node):
 
 
 def size(hashes):
-    """'6 hashes (2 of them E)' for a list of hashes."""
+    """'6 hashes (2 E)' for a list of hashes; E = an empty slot (32 zero bytes)."""
     empty = hashes.count(EMPTY)
     if empty:
-        return f"{len(hashes)} hashes ({empty} of them E)"
+        return f"{len(hashes)} hashes ({empty} E)"
     return f"{len(hashes)} hashes"
+
+
+def shown_keys(proof):
+    """The keys of the records a range proof shows."""
+    return [x[0] for x in range_proof_items(proof) if isinstance(x, tuple)]
 
 
 def hide_record(node, key):
@@ -82,126 +75,186 @@ def hide_record(node, key):
     return node
 
 
+def caught(check):
+    """Record one check that a lie was rejected."""
+    results.append(check)
+    return "caught" if check else "MISSED!"
+
+
+def print_marks(rows, header):
+    """A table of checks: one row per label, one mark for each tree."""
+    print(f"   {header:48s} MB-tree  EMB-tree")
+    for label, (mb_ok, emb_ok) in rows.items():
+        print(f"   {label:48s} {mark(mb_ok):8s} {mark(emb_ok)}")
+
+
 def print_shape(tree):
-    for level in tree.levels():
-        print("      " + " ".join(str(keys) for keys in level))
-
-
-def section(title):
-    print(f"\n=== {title} " + "=" * (70 - len(title)))
+    levels = tree.levels()
+    for depth, level in enumerate(levels):
+        last = depth == len(levels) - 1
+        name = "root" if depth == 0 else "leaves" if last else "inner"
+        sep = " " if last else " | "  # leaves hold records, inner nodes hold signposts
+        nodes = ["[" + sep.join(map(str, keys)) + "]" for keys in level]
+        print(f"   {name:8s}  " + "  ".join(nodes))
 
 
 def main():
-    trees = {"MB-tree  (fanout 4)": MBTree(4), "EMB-tree (fanout 4, f_k 2)": EMBTree(4, fk=2)}
+    mb, emb = MBTree(4), EMBTree(4, fk=2)
+    trees = {"MB-tree": mb, "EMB-tree": emb}
+    line = "=" * 78
+    print(line)
+    print("  MB-tree vs EMB-tree: the 16-key toy example")
+    print("  fanout 4, EMB small-tree fanout f_k = 2, keys 1..16 inserted in order")
+    print("  Every answer is checked like a client would: answer + proof + trusted root.")
+    print(line)
 
-    section("insert(1..16): keys in ascending order, toy names as values")
-    proofs_ok = True
+    # 1 ------------------------------------------------------------------
+    section(1, "BUILD THE TREE", "Insert keys 1..16 into both trees.")
     for key, toy in enumerate(TOYS, start=1):
         for tree in trees.values():
-            old_root = tree.root_hash
-            proof = tree.insert(key, toy)   # first proves the key is new, then inserts
-            proofs_ok &= verify_read(key, None, proof, old_root)
-    check("all 32 inserts came with a valid non-membership proof", proofs_ok)
-    mb, emb = trees.values()
-    print("   B+ tree shape (the same for both trees):")
+            tree.insert(key, toy)
+    print(f"   both trees have the same B+ tree shape   {mark(mb.levels() == emb.levels())}\n")
     print_shape(mb)
-    check("both trees have the same shape", mb.levels() == emb.levels())
-    roots = {}
+    roots = {name: tree.root_hash for name, tree in trees.items()}
+    print("\n   Root hash published by the owner:")
+    for name, root in roots.items():
+        print(f"     {name:9s} {root.hex()[:16]}...")
+
+    # 2 ------------------------------------------------------------------
+    section(2, "READ 14", "The server sends the answer + a proof; the client checks it with the root.")
+    print(f"   {'tree':9s} {'answer':10s} {'proof':15s} client")
     for name, tree in trees.items():
-        roots[name] = tree.root_hash
-        print(f"   {name}  root = {tree.root_hash.hex()[:16]}...   (the owner publishes this)")
+        value, proof = tree.read(14)
+        flag = mark(verify_read(14, value, proof, roots[name]))
+        print(f"   {name:9s} {value:10s} {size(read_proof_hashes(proof)):15s} {flag} accepted")
 
-    section("read(key): value + proof, checked against the trusted root")
-    for key in (2, 14):
-        for name, tree in trees.items():
-            value, proof = tree.read(key)
-            print(f"   {name}  read({key}) = {value!r}, {size(read_proof_hashes(proof))}: {show_read_proof(proof)}")
-            check(f"client accepts read({key})", verify_read(key, value, proof, roots[name]))
+    # 3 ------------------------------------------------------------------
+    section(3, "READ A RANGE: 5 to 9",
+            "The proof also shows one boundary record on each side, so nothing is left out.")
+    print(f"   {'tree':9s} {'answer':11s} {'shown':7s} {'proof':15s} client")
     for name, tree in trees.items():
-        value, proof = tree.read(99)
-        print(f"   {name}  read(99) = {value!r} (not found); proof of absence: {show_range_proof(proof)}")
-        check("client accepts that 99 is not in the tree", verify_read(99, None, proof, roots[name]))
+        records, proof = tree.read_range(5, 9)
+        flag = mark(verify_range(5, 9, records, proof, roots[name]))
+        answer = " ".join(str(k) for k, _ in records)
+        shown = shown_keys(proof)
+        hashes = [x for x in range_proof_items(proof) if isinstance(x, bytes)]
+        print(f"   {name:9s} {answer:11s} {f'{shown[0]}..{shown[-1]}':7s} {size(hashes):15s} "
+              f"{flag} complete")
 
-    section("read_range(low, high): records + boundary records + hashes")
-    for low, high in ((1, 5), (9, 12), (17, 20)):
-        for name, tree in trees.items():
-            records, proof = tree.read_range(low, high)
-            hashes = [x for x in range_proof_items(proof) if isinstance(x, bytes)]
-            print(f"   {name}  read_range({low}, {high}) -> keys {[k for k, _ in records]}, {size(hashes)}")
-            print(f"      proof: {show_range_proof(proof)}")
-            check(f"client accepts the range ({low}, {high}) as correct and complete",
-                  verify_range(low, high, records, proof, roots[name]))
-
-    section("update(5, 'robot'): only the path to the root is re-hashed")
+    # 4 ------------------------------------------------------------------
+    section(4, "UPDATE 14",
+            "Change key 14 from 'jump rope' to 'robot'. Only the path up to the root is re-hashed.")
+    print(f"   {'tree':9s} {'new root':19s} {'new answer accepted':20s} old answer rejected")
     for name, tree in trees.items():
-        old_value, old_proof = tree.read(5)
-        tree.update(5, "robot")
-        new_root = tree.root_hash
-        value, proof = tree.read(5)
-        print(f"   {name}  new root = {new_root.hex()[:16]}...   read(5) = {value!r}")
-        check("new answer accepted with the new root", verify_read(5, value, proof, new_root))
-        check("old answer ('yo-yo') rejected with the new root",
-              not verify_read(5, old_value, old_proof, new_root))
-        roots[name] = new_root
+        old_value, old_proof = tree.read(14)
+        tree.update(14, "robot")
+        root = roots[name] = tree.root_hash
+        value, proof = tree.read(14)
+        new_ok = mark(value == "robot" and verify_read(14, value, proof, root))
+        old_bad = mark(not verify_read(14, old_value, old_proof, root))
+        print(f"   {name:9s} {root.hex()[:16]}... {new_ok:20s} {old_bad}")
 
-    section("insert(17, 'kazoo'): non-membership proof first, then the last leaf splits")
+    # 5 ------------------------------------------------------------------
+    section(5, "INSERT 17", "First a proof that 17 is new; then 17 goes into the last leaf, which splits.")
+    rows = {"proof that 17 was new (old root)": [], "read(17) is accepted (new root)": []}
     for name, tree in trees.items():
         proof = tree.insert(17, "kazoo")
-        check(f"{name}: proof that 17 was new, against the old root",
-              verify_read(17, None, proof, roots[name]))
+        rows["proof that 17 was new (old root)"].append(verify_read(17, None, proof, roots[name]))
         roots[name] = tree.root_hash
         value, proof = tree.read(17)
-        check(f"{name}: read(17) accepted", verify_read(17, value, proof, roots[name]))
-    print("   new shape:")
+        rows["read(17) is accepted (new root)"].append(verify_read(17, value, proof, roots[name]))
+    print_marks(rows, "")
+    print("\n   Leaf [13 14 15 16 17] is too full: it splits into [13 14 15] and [16 17],")
+    print("   and 16 is copied up as a new signpost. The new shape:\n")
     print_shape(mb)
 
-    section("proof that a key is missing: every case (keys 10, 20, ..., 160)")
+    # 6 ------------------------------------------------------------------
+    section(6, "PROOF THAT A KEY IS MISSING",
+            "A new tree with gaps (keys 10, 20, ..., 160). The proof shows the neighbours.")
     cases = [("smaller than every key", 5), ("larger than every key", 999),
              ("same leaf, same small-tree group", 15), ("same leaf, different groups", 25),
              ("neighbouring leaves, same parent", 35), ("leaves under different parents", 95)]
-    for name, tree_class in (("MB-tree", MBTree), ("EMB-tree", EMBTree)):   # fanout 4 (EMB-tree: f_k = 2)
-        gapped = tree_class(4)
+    gapped = []
+    for tree_class in (MBTree, EMBTree):   # fanout 4 (EMB-tree: f_k = 2)
+        tree = tree_class(4)
         for k in range(10, 170, 10):
-            gapped.insert(k, f"v{k}")
-        print(f"   {name}")
-        for label, key in cases:
-            value, proof = gapped.read(key)
-            shown = [x[0] for x in range_proof_items(proof) if isinstance(x, tuple)]
-            check(f"{label:34s} read({key}) = None, neighbours shown: {shown}",
-                  value is None and verify_read(key, None, proof, gapped.root_hash))
+            tree.insert(k, f"v{k}")
+        gapped.append(tree)
+    print(f"   {'where the key falls':34s} {'key':5s} {'shown':7s} MB-tree  EMB-tree")
+    for label, key in cases:
+        flags, shown = [], []
+        for tree in gapped:
+            value, proof = tree.read(key)
+            shown.append(shown_keys(proof))
+            flags.append(value is None and verify_read(key, None, proof, tree.root_hash))
+        nb = " ".join(map(str, shown[0])) if shown[0] == shown[1] else f"{shown[0]} / {shown[1]}"
+        print(f"   {label:34s} {key:<5d} {nb:7s} {mark(flags[0]):8s} {mark(flags[1])}")
+    flags = []
+    for tree_class in (MBTree, EMBTree):
         empty = tree_class(4)
         value, proof = empty.read(5)
-        check("empty tree: read(5) = None", value is None and verify_read(5, None, proof, empty.root_hash))
+        flags.append(value is None and verify_read(5, None, proof, empty.root_hash))
+    print(f"   {'the tree is empty':34s} {5:<5d} {'-':7s} {mark(flags[0]):8s} {mark(flags[1])}")
 
-    section("a cheating server is caught")
+    # 7 ------------------------------------------------------------------
+    section(7, "A CHEATING SERVER IS CAUGHT",
+            "The server lies. The client rebuilds the root from the answer + proof; it no\n"
+            "   longer matches the trusted root, so the client rejects the answer.")
+    lies = ["says key 14 is 'bike' (it is 'robot')",
+            "changes one bit of one hash in the proof",
+            "says key 14 is not found (it is there)",
+            "hides record 7 from the range 5 to 9",
+            "leaves record 5 out of the range 5 to 9"]
+    rows = {lie: [] for lie in lies}
     for name, tree in trees.items():
-        print(f"   {name}")
-        value, proof = tree.read(2)
-        check("value changed from 'car' to 'bike'", not verify_read(2, "bike", proof, roots[name]))
+        value, proof = tree.read(14)
+        rows[lies[0]].append(not verify_read(14, "bike", proof, roots[name]))
         bad = [(list(left), list(right)) for left, right in proof]
         side = bad[0][0] or bad[0][1]
         side[0] = bytes([side[0][0] ^ 1]) + side[0][1:]  # flip one bit of one proof hash
-        check("one bit of one proof hash flipped", not verify_read(2, value, bad, roots[name]))
-        _, absent = tree.read(99)
-        check("'not found' claimed for key 2, which exists", not verify_read(2, None, absent, roots[name]))
-        records, proof = tree.read_range(9, 12)
-        check("record 10 hidden from read_range(9, 12)",
-              not verify_range(9, 12, [r for r in records if r[0] != 10], hide_record(proof, 10), roots[name]))
-        check("read_range answer with one record dropped",
-              not verify_range(9, 12, records[1:], proof, roots[name]))
+        rows[lies[1]].append(not verify_read(14, value, bad, roots[name]))
+        _, absent = tree.read(99)  # a real "not found" proof, sent for key 14
+        rows[lies[2]].append(not verify_read(14, None, absent, roots[name]))
+        records, proof = tree.read_range(5, 9)
+        rows[lies[3]].append(not verify_range(
+            5, 9, [r for r in records if r[0] != 7], hide_record(proof, 7), roots[name]))
+        rows[lies[4]].append(not verify_range(5, 9, records[1:], proof, roots[name]))
+    print(f"   {'the server...':44s} {'MB-tree':10s} EMB-tree")
+    for lie, (mb_ok, emb_ok) in rows.items():
+        print(f"   {lie:44s} {caught(mb_ok):10s} {caught(emb_ok)}")
 
-    section("both trees give identical answers")
-    same_reads = all(mb.read(k)[0] == emb.read(k)[0] for k in range(-2, 20))
-    same_ranges = all(mb.read_range(a, b)[0] == emb.read_range(a, b)[0]
-                      for a in range(-2, 20) for b in range(a - 1, 20))
-    check("read(k) for k = -2..19", same_reads)
-    check("read_range(a, b) for all -2 <= a <= b+1 <= 20", same_ranges)
+    # 8 ------------------------------------------------------------------
+    section(8, "BOTH TREES GIVE THE SAME ANSWERS",
+            "The same question to both trees gives the same answer. Only the proofs differ.")
 
-    print()
-    if failures:
-        print(f"{len(failures)} CHECK(S) FAILED")
+    def answer(tree, question):
+        low, high = question
+        if low == high:
+            value = tree.read(low)[0]
+            return "not found" if value is None else value
+        return " ".join(str(k) for k, _ in tree.read_range(low, high)[0]) or "(none)"
+
+    print(f"   {'question':20s} {'MB-tree answer':16s} {'EMB-tree answer':16s} same?")
+    for low, high in ((14, 14), (99, 99), (5, 9), (15, 20)):
+        question = f"read({low})" if low == high else f"read_range({low}, {high})"
+        mb_ans, emb_ans = answer(mb, (low, high)), answer(emb, (low, high))
+        print(f"   {question:20s} {mb_ans:16s} {emb_ans:16s} {mark(mb_ans == emb_ans)}")
+
+    keys = range(-2, 20)  # keys 1..17 are in the tree; -2..0, 18, 19 are not
+    reads = all(mb.read(k)[0] == emb.read(k)[0] for k in keys)
+    ranges = all(mb.read_range(a, b)[0] == emb.read_range(a, b)[0]
+                 for a in keys for b in keys if a <= b)
+    print("\n   And not just these: every key from -2 to 19 (22 reads) and every range")
+    print(f"   inside -2..19 (253 range reads) give the same answer on both trees.  {mark(reads, ranges)}")
+
+    print("\n" + line)
+    failed = results.count(False)
+    if failed:
+        print(f"  {failed} of {len(results)} checks FAILED")
+        print(line)
         sys.exit(1)
-    print("All checks passed.")
+    print(f"  All checks passed ({len(results)} checks).")
+    print(line)
 
 
 if __name__ == "__main__":
