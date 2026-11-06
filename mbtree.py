@@ -1,12 +1,18 @@
 """Merkle B-tree (MB-tree), paper Section 3.2: a B+ tree whose nodes carry hashes.
 
 B+ tree rules (README: "standard B+-tree search, insertion, and split behavior"):
-- fanout f = the maximum number of entries in a node
-  (records in a leaf, children in an inner node); f must be at least 3.
-- A node that gets f + 1 entries splits into two halves; when the count is
-  odd, the LEFT half gets the extra entry (f = 4: 5 -> 3 + 2).
-- Leaf split: the first key of the right half is COPIED up to the parent.
-- Inner split: the middle key is MOVED up to the parent.
+Node sizes follow Silberschatz, Korth and Sudarshan, Database System Concepts
+(7th ed., Section 14.3), with n = fanout f (at least 3):
+- an inner node has at most f children (f - 1 signposts) and, except the
+  root, at least ceil(f/2) children; the root has at least 2;
+- a leaf holds at most f - 1 records (the book's last pointer, the link to
+  the next leaf, is `next` here) and, except the root, at least ceil((f-1)/2).
+- Leaf split: a leaf that already holds f - 1 records gets one more; the f
+  records split into the first ceil(f/2) and the rest (f = 4: 4 -> 2 + 2).
+  The first key of the new right leaf is COPIED up to the parent.
+- Inner split: a node that already has f children gets one more; the first
+  ceil((f+1)/2) children stay and the rest move (f = 4: 5 -> 3 + 2). The key
+  between them is MOVED up to the parent (book Figure 14.17).
 - When the root splits, a new root is made and the tree gets one level taller.
 - Leaves are linked left to right, so a range search can walk along them.
 - Keys are unique integers and values are text.
@@ -30,7 +36,7 @@ from hashing import node_hash, record_hash
 
 
 class Leaf:
-    """Up to `fanout` records, sorted by key, plus a link to the next leaf."""
+    """Up to `fanout` - 1 records, sorted by key, plus a link to the next leaf."""
 
     def __init__(self, keys, values, hashes):
         self.keys = keys
@@ -233,7 +239,7 @@ class MBTree:
 
     def _overfull(self, node):
         if isinstance(node, Leaf):
-            return len(node.keys) > self.fanout
+            return len(node.keys) > self.fanout - 1  # a leaf holds at most f - 1 records
         return len(node.children) > self.fanout
 
     def _split_leaf(self, leaf):

@@ -1,9 +1,9 @@
 """The 16-key toy example (from the email), on both trees.
 
 Builds the tree from keys 1..16, then shows read(14), read_range(5, 9),
-update(14) and insert(17) (with its non-membership proof), and checks every
-proof the way a client would: with only the answer, the proof and the owner's
-trusted root. It also shows every kind of missing-key proof and that tampered
+update(14), insert(17) and insert(18) (each with its non-membership proof), and
+checks every proof the way a client would: with only the answer, the proof and
+the owner's trusted root. It also shows every kind of missing-key proof and that tampered
 answers are rejected.
 
 Run:  python demo_toy16.py      (exit code 0 = every check passed)
@@ -104,7 +104,8 @@ def main():
     line = "=" * 78
     print(line)
     print("  MB-tree vs EMB-tree: the 16-key toy example")
-    print("  fanout 4, EMB small-tree fanout f_k = 2, keys 1..16 inserted in order")
+    print("  fanout n = 4 (a leaf holds at most n - 1 = 3 keys), EMB small-tree fanout f_k = 2")
+    print("  keys 1..16 inserted in order")
     print("  Every answer is checked like a client would: answer + proof + trusted root.")
     print(line)
 
@@ -155,32 +156,37 @@ def main():
         print(f"   {name:9s} {root.hex()[:16]}... {new_ok:20s} {old_bad}")
 
     # 5 ------------------------------------------------------------------
-    section(5, "INSERT 17", "First a proof that 17 is new; then 17 goes into the last leaf, which splits.")
-    rows = {"proof that 17 was new (old root)": [], "read(17) is accepted (new root)": []}
-    for name, tree in trees.items():
-        proof = tree.insert(17, "kazoo")
-        rows["proof that 17 was new (old root)"].append(verify_read(17, None, proof, roots[name]))
-        roots[name] = tree.root_hash
-        value, proof = tree.read(17)
-        rows["read(17) is accepted (new root)"].append(verify_read(17, value, proof, roots[name]))
+    section(5, "INSERT 17 AND 18",
+            "Each insert first proves the key is new; then the key goes into the last leaf.")
+    rows = {}
+    for key, toy in ((17, "kazoo"), (18, "slinky")):
+        new, read = f"proof that {key} was new (old root)", f"read({key}) is accepted (new root)"
+        rows[new], rows[read] = [], []
+        for name, tree in trees.items():
+            proof = tree.insert(key, toy)
+            rows[new].append(verify_read(key, None, proof, roots[name]))
+            roots[name] = tree.root_hash
+            value, proof = tree.read(key)
+            rows[read].append(verify_read(key, value, proof, roots[name]))
     print_marks(rows, "")
-    print("\n   Leaf [13 14 15 16 17] is too full: it splits into [13 14 15] and [16 17],")
-    print("   and 16 is copied up as a new signpost. The new shape:\n")
+    print("\n   17 fits: the last leaf [15 16] becomes [15 16 17] (a leaf holds at most 3).")
+    print("   18 does not: [15 16 17 18] splits into [15 16] and [17 18], and 17 is copied")
+    print("   up as a new signpost: [15] becomes [15 | 17]. The new shape:\n")
     print_shape(mb)
 
     # 6 ------------------------------------------------------------------
     section(6, "PROOF THAT A KEY IS MISSING",
-            "A new tree with gaps (keys 10, 20, ..., 160). The proof shows the neighbours.")
+            "A new tree with gaps (keys 10, 20, ..., 170). The proof shows the neighbours.")
     cases = [("smaller than every key", 5), ("larger than every key", 999),
-             ("same leaf, same small-tree group", 15), ("same leaf, different groups", 25),
-             ("neighbouring leaves, same parent", 35), ("leaves under different parents", 95)]
+             ("same leaf, same small-tree group", 15), ("same leaf, different groups", 165),
+             ("neighbouring leaves, same parent", 25), ("leaves under different parents", 65)]
     gapped = []
     for tree_class in (MBTree, EMBTree):   # fanout 4 (EMB-tree: f_k = 2)
         tree = tree_class(4)
-        for k in range(10, 170, 10):
+        for k in range(10, 180, 10):
             tree.insert(k, f"v{k}")
         gapped.append(tree)
-    print(f"   {'where the key falls':34s} {'key':5s} {'shown':7s} MB-tree  EMB-tree")
+    print(f"   {'where the key falls':34s} {'key':5s} {'shown':9s} MB-tree  EMB-tree")
     for label, key in cases:
         flags, shown = [], []
         for tree in gapped:
@@ -188,13 +194,13 @@ def main():
             shown.append(shown_keys(proof))
             flags.append(value is None and verify_read(key, None, proof, tree.root_hash))
         nb = " ".join(map(str, shown[0])) if shown[0] == shown[1] else f"{shown[0]} / {shown[1]}"
-        print(f"   {label:34s} {key:<5d} {nb:7s} {mark(flags[0]):8s} {mark(flags[1])}")
+        print(f"   {label:34s} {key:<5d} {nb:9s} {mark(flags[0]):8s} {mark(flags[1])}")
     flags = []
     for tree_class in (MBTree, EMBTree):
         empty = tree_class(4)
         value, proof = empty.read(5)
         flags.append(value is None and verify_read(5, None, proof, empty.root_hash))
-    print(f"   {'the tree is empty':34s} {5:<5d} {'-':7s} {mark(flags[0]):8s} {mark(flags[1])}")
+    print(f"   {'the tree is empty':34s} {5:<5d} {'-':9s} {mark(flags[0]):8s} {mark(flags[1])}")
 
     # 7 ------------------------------------------------------------------
     section(7, "A CHEATING SERVER IS CAUGHT",
@@ -240,7 +246,7 @@ def main():
         mb_ans, emb_ans = answer(mb, (low, high)), answer(emb, (low, high))
         print(f"   {question:20s} {mb_ans:16s} {emb_ans:16s} {mark(mb_ans == emb_ans)}")
 
-    keys = range(-2, 20)  # keys 1..17 are in the tree; -2..0, 18, 19 are not
+    keys = range(-2, 20)  # keys 1..18 are in the tree; -2..0 and 19 are not
     reads = all(mb.read(k)[0] == emb.read(k)[0] for k in keys)
     ranges = all(mb.read_range(a, b)[0] == emb.read_range(a, b)[0]
                  for a in keys for b in keys if a <= b)

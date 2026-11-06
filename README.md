@@ -33,7 +33,7 @@ Both trees support:
 ## Quick start
 
 Only Python 3 is needed (standard library, nothing to install).
-Tested with Python 3.12, 3.14 and 3.15 on Windows 11.
+Tested with Python 3.15 on Windows 11.
 
 ```
 git clone https://github.com/immohamedadhil/mbtree-embtree.git
@@ -43,34 +43,35 @@ cd mbtree-embtree
 | Command | What it does | Time |
 |---|---|---|
 | `python demo_toy16.py` | The 16-key example on both trees. Ends with "All checks passed" (exit code 0) | 1 s |
-| `python -m unittest -v test_trees` | All 91 tests | about 40 s |
+| `python -m unittest -v test_trees` | All 93 tests | about 40 s |
 | `python benchmark.py` | Compares the two trees with 10,000 records (output: `benchmark_results.md`) | about 2 min |
 
 ## The demo: 16 keys
 
-Keys 1 to 16 are inserted in order, with fanout 4 (at most 4 children per node) and,
-for the EMB-tree, small-tree fanout f_k = 2. Both trees get the same shape:
+Keys 1 to 16 are inserted in order, with fanout n = 4 (at most 4 children per inner
+node, at most 3 keys per leaf) and, for the EMB-tree, small-tree fanout f_k = 2. Both
+trees get the same shape:
 
 ```
-root     [10]
-inner    [4 | 7]  [13]
-leaves   [1 2 3]  [4 5 6]  [7 8 9]  [10 11 12]  [13 14 15 16]
+root     [7 | 13]
+inner    [3 | 5]  [9 | 11]  [15]
+leaves   [1 2]  [3 4]  [5 6]  [7 8]  [9 10]  [11 12]  [13 14]  [15 16]
 ```
 
 `python demo_toy16.py` then shows, on both trees, with every proof checked like a client would:
 
 1. **Build the tree** and the two root hashes the owner publishes
-2. **Read 14:** the answer and its proof (MB-tree 5 hashes, EMB-tree 6)
+2. **Read 14:** the answer and its proof (MB-tree 4 hashes, EMB-tree 6)
 3. **Read the range 5 to 9:** the proof also shows 4 and 10, so nothing at the edges is left out
 4. **Update 14:** the new answer is accepted, the old one is rejected
-5. **Insert 17:** a proof that 17 is new; the last leaf splits
+5. **Insert 17 and 18:** a proof that each key is new; 17 fits in the last leaf, 18 splits it
 6. **Missing keys:** a proof for every place a missing key can fall
 7. **A cheating server:** five kinds of lies, each one caught
 8. **Same answers:** both trees always give the same answers; only the proofs differ
 
 ## Results
 
-**Is it correct?** Yes. All 91 tests pass. Both trees always give the same answers.
+**Is it correct?** Yes. All 93 tests pass. Both trees always give the same answers.
 Every honest proof is accepted, and every lie I tried (changed value, changed proof,
 hidden record, false "not found") is caught.
 
@@ -83,7 +84,7 @@ hidden record, false "not found") is caught.
 |---:|---:|---:|
 | 8 | 25 | 18 |
 | 32 | 64 | 15 |
-| 128 | 201 | 14 |
+| 128 | 203 | 14 |
 
 The MB-tree proof grows as nodes get bigger. The EMB-tree proof stays small.
 (MB-tree numbers are averages over 1,000 reads, rounded; EMB-tree reads all have the same size.)
@@ -92,14 +93,14 @@ The MB-tree proof grows as nodes get bigger. The EMB-tree proof stays small.
 
 | Operation | MB-tree | EMB-tree |
 |---|---:|---:|
-| Insert | 59 | 492 |
-| Read: find the record | 2.5 | 2.7 |
-| Read: make the proof | 8 | 26 |
-| Read: check the proof (client) | 56 | 104 |
-| Update | 36 | 90 |
+| Insert | 28 | 178 |
+| Read: find the record | 1.5 | 1.7 |
+| Read: make the proof | 4 | 9 |
+| Read: check the proof (client) | 24 | 36 |
+| Update | 17 | 35 |
 
 Fanouts 8 and 128 show the same pattern. One exception: at fanout 128 the EMB-tree
-checks read proofs faster (79 vs 120). Finding a record runs the same code in both
+checks read proofs faster (38 vs 52). Finding a record runs the same code in both
 trees, so the small differences there are just noise.
 
 ### In one sentence
@@ -129,7 +130,7 @@ All the numbers (every fanout, range reads, bytes): [RESULTS.md](RESULTS.md) and
 | `hashing.py` | SHA-256 hashes of records and nodes |
 | `verify.py` | The client side: `verify_read` and `verify_range`. It uses only the answer, the proof and the trusted root, never the tree |
 | `demo_toy16.py` | The 16-key example |
-| `test_trees.py` | 91 tests |
+| `test_trees.py` | 93 tests |
 | `benchmark.py` | The benchmark; its latest output is `benchmark_results.md` |
 
 ## Using the trees in your own code
@@ -186,16 +187,16 @@ EMB-tree the small-tree groups are nested the same way, so one checker works for
 **Missing key.** `read(key)` returns `(None, proof)`, where the proof is the range proof
 for [key, key]. It shows the two neighbours of the key side by side, so the client sees
 there is nothing between them. Every place a missing key can fall is tested on both trees
-(`TestNonMembership`; keys 10, 20, …, 160; fanout 4, f_k = 2):
+(`TestNonMembership`; keys 10, 20, …, 170; fanout 4, f_k = 2):
 
 | Where the key falls | Example | Records shown |
 |---|---|---|
 | before every key | `read(5)` | 10 |
-| after every key | `read(999)` | 160 |
+| after every key | `read(999)` | 170 |
 | inside one leaf, inside one small-tree group | `read(15)` | 10, 20 |
-| inside one leaf, between two small-tree groups (matters for the EMB-tree) | `read(25)` | 20, 30 |
-| between two leaves with the same parent | `read(35)` | 30, 40 |
-| between two leaves with different parents | `read(95)` | 90, 100 |
+| inside one leaf, between two small-tree groups (matters for the EMB-tree) | `read(165)` | 160, 170 |
+| between two leaves with the same parent | `read(25)` | 20, 30 |
+| between two leaves with different parents | `read(65)` | 60, 70 |
 | the tree is empty | `read(5)` | none |
 
 A key equal to a signpost is never missing: there is no delete, so every signpost is a
@@ -211,7 +212,7 @@ again; in the EMB-tree, only one path through each small tree on the way.
 
 | Setting | Meaning | Values used |
 |---|---|---|
-| `fanout` | Most entries per node (records in a leaf, children in an inner node); the EMB-tree's f_e. At least 3 | 16-key example: 4. Benchmark: 8, 32, 128 |
+| `fanout` | n in the textbook: at most n children per inner node and n − 1 records per leaf; the EMB-tree's f_e. At least 3 | 16-key example: 4. Benchmark: 8, 32, 128 |
 | `fk` | EMB-tree small-tree fanout f_k. At least 2 | 2 (the paper's default, Section 6.2) |
 | Benchmark | 10,000 records in random order (seed 42); 1,000 reads, 1,000 updates, 200 range reads of 50 records; median of 5 runs | At the top of `benchmark.py` |
 
@@ -225,7 +226,12 @@ again; in the EMB-tree, only one path through each small tree on the way.
 4. **No signature:** the client gets the trusted root directly (as the task allows).
 5. **In memory:** the fanout is set directly, the same for both trees.
 6. **Keys** are unique integers, and **values** are text.
-7. **Splits:** 5 entries become 3 + 2.
+7. **B+ tree rules** follow Silberschatz, Korth and Sudarshan, *Database System Concepts*
+   (7th ed., Section 14.3), with n = fanout: an inner node has ⌈n/2⌉ to n children, a leaf
+   ⌈(n−1)/2⌉ to n − 1 records. A full leaf that gets one more record splits into the first
+   ⌈n/2⌉ and the rest (n = 4: 4 → 2 + 2), and the new leaf's first key is copied up. An
+   inner node with one child too many keeps the first ⌈(n+1)/2⌉ children (5 → 3 + 2), and
+   the key between the halves moves up.
 8. **Missing keys are proven,** and every insert proves its key is new (suggested by the
    reviewer).
 9. **Not implemented:** delete, batch updates, signatures, and other variants (not required).
