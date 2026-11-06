@@ -1,48 +1,107 @@
-# MB-tree and EMB-tree: authenticated B+-trees in Python
+# MB-tree and EMB-tree in Python
 
 Author: Mohamed Adhil J
 
-An in-memory Python 3 implementation of the **Merkle B-tree (MB-tree)** and the
-**Embedded Merkle B-tree (EMB-tree)** from F. Li, M. Hadjieleftheriou, G. Kollios
-and L. Reyzin, *Dynamic Authenticated Index Structures for Outsourced Databases*,
-SIGMOD 2006 (Sections 3.2, 3.3, 4.2–4.3).
+## What is this?
 
-Both trees support `insert` (with a proof that the key is new), `read` (with a
-proof), `read_range` (with a proof of correctness and completeness) and `update`.
-A separate client-side module checks every proof against an independently
-supplied trusted root hash. The comparison of the two trees is in [RESULTS.md](RESULTS.md).
+A data owner stores data on a server it does not fully trust. Clients ask the server
+questions. **How can a client be sure the server's answer is genuine and complete?**
+
+This repository implements two solutions from the paper by F. Li, M. Hadjieleftheriou,
+G. Kollios and L. Reyzin, *Dynamic Authenticated Index Structures for Outsourced
+Databases*, SIGMOD 2006 (Sections 3.2, 3.3, 4.2–4.3):
+
+- **MB-tree (Merkle B-tree):** a B+ tree in which every node also has a hash, a
+  fingerprint of everything below it. The owner publishes only the **root hash**.
+- **EMB-tree (Embedded Merkle B-tree):** the same B+ tree, but inside every node the
+  hashes form a small binary Merkle tree. This makes the proofs much shorter when nodes
+  are big.
+
+With every answer the server sends a short **proof**. The client rebuilds the root hash
+from the answer and the proof. If it equals the trusted root hash, the answer is genuine;
+if the server changed or left out anything, it does not match.
+
+Both trees support:
+
+| Operation | What the client gets |
+|---|---|
+| `insert(key, value)` | a proof that the key was not in the tree before |
+| `read(key)` | the value + a proof (for a missing key: a proof that it is missing) |
+| `read_range(low, high)` | all records in the range + a proof that none is changed or left out |
+| `update(key, value)` | the root hash changes, so old answers no longer pass the check |
+
+## Quick start
+
+Only Python 3 is needed (standard library, nothing to install).
+Tested with Python 3.12, 3.14 and 3.15 on Windows 11.
+
+```
+git clone https://github.com/immohamedadhil/mbtree-embtree.git
+cd mbtree-embtree
+```
+
+| Command | What it does | Time |
+|---|---|---|
+| `python demo_toy16.py` | The 16-key example on both trees. Ends with "All checks passed" (exit code 0) | 1 s |
+| `python -m unittest -v test_trees` | All 91 tests | about 40 s |
+| `python benchmark.py` | Compares the two trees with 10,000 records (output: `benchmark_results.md`) | about 2 min |
+
+## The demo: 16 keys
+
+Keys 1 to 16 are inserted in order, with fanout 4 (at most 4 children per node) and,
+for the EMB-tree, small-tree fanout f_k = 2. Both trees get the same shape:
+
+```
+root     [10]
+inner    [4 | 7]  [13]
+leaves   [1 2 3]  [4 5 6]  [7 8 9]  [10 11 12]  [13 14 15 16]
+```
+
+`python demo_toy16.py` then shows, on both trees, with every proof checked like a client would:
+
+1. **Build the tree** and the two root hashes the owner publishes
+2. **Read 14:** the answer and its proof (MB-tree 5 hashes, EMB-tree 6)
+3. **Read the range 5 to 9:** the proof also shows 4 and 10, so nothing at the edges is left out
+4. **Update 14:** the new answer is accepted, the old one is rejected
+5. **Insert 17:** a proof that 17 is new; the last leaf splits
+6. **Missing keys:** a proof for every place a missing key can fall
+7. **A cheating server:** five kinds of lies, each one caught
+8. **Same answers:** both trees always give the same answers; only the proofs differ
+
+## Results in short
+
+| Read proof size (hashes) | MB-tree | EMB-tree |
+|---|---:|---:|
+| 16-key example, fanout 4 | 5 | 6 |
+| 10,000 records, fanout 8 | 25 | 18 |
+| 10,000 records, fanout 32 | 64.3 | 15 |
+| 10,000 records, fanout 128 | 201.3 | 14 |
+
+The 16-key row is the single read(14). The rows with 10,000 records are averages over
+1,000 reads: MB-tree nodes are not all equally full, so its proof size varies from read
+to read; the EMB-tree's padded small trees give every read the same proof size.
+
+- The MB-tree proof grows with the fanout; the EMB-tree proof stays small.
+- The price: EMB-tree inserts are slower (3.4× at fanout 8, 8.3× at 32, 13× at 128),
+  because they rebuild the small trees of the changed nodes.
+- In very small nodes (the 16-key example) the EMB-tree has no advantage.
+
+Full numbers and discussion: [RESULTS.md](RESULTS.md) and
+[benchmark_results.md](benchmark_results.md).
 
 ## Files
 
-| File | Contents |
+| File | What is in it |
 |---|---|
-| `mbtree.py` | MB-tree (Section 3.2; updates Section 4.2): a B+-tree whose nodes carry hashes. Search, range search, insert with node splits, update, and the proofs |
-| `embtree.py` | EMB-tree (Section 3.3; updates Section 4.3): the MB-tree with a small Merkle tree inside every node. It replaces four MB-tree methods, all about one node: how it is hashed, how it is updated, and how it appears in a read proof and in a range proof |
-| `hashing.py` | SHA-256 record and node hashes; record encoding |
-| `verify.py` | Client side: `verify_read`, `verify_range`. Uses only the answer, the proof and the trusted root, never the tree |
-| `test_trees.py` | 91 unit tests |
-| `demo_toy16.py` | The 16-key toy example on both trees |
-| `benchmark.py` | Benchmark; its latest output is `benchmark_results.md` |
+| `mbtree.py` | The MB-tree: search, insert with node splits, update, and the proofs |
+| `embtree.py` | The EMB-tree: the MB-tree with a small Merkle tree inside every node. It changes only four methods, all about one node: how it is hashed, how it is updated, and how it appears in a read proof and in a range proof |
+| `hashing.py` | SHA-256 hashes of records and nodes |
+| `verify.py` | The client side: `verify_read` and `verify_range`. It uses only the answer, the proof and the trusted root, never the tree |
+| `demo_toy16.py` | The 16-key example |
+| `test_trees.py` | 91 tests |
+| `benchmark.py` | The benchmark; its latest output is `benchmark_results.md` |
 
-## Setup
-
-Python 3 with the standard library only; nothing to install.
-Tested with Python 3.12 and 3.14 on Windows 11.
-
-```
-git clone <repository-url>
-cd <repository-folder>
-```
-
-## Commands
-
-```
-python -m unittest -v test_trees    # all tests (about 40 s)
-python demo_toy16.py                # 16-key toy example; exit code 0 = every check passed
-python benchmark.py                 # benchmark (about 2 min); the settings are at the top of benchmark.py
-```
-
-## Using the trees
+## Using the trees in your own code
 
 ```python
 from embtree import EMBTree
@@ -70,39 +129,33 @@ tree.update(2, "bike")                    # the root hash changes; old answers n
 
 ## How it works
 
-- **Hashes (Section 3.2).** A leaf entry carries h = H(0x00 ‖ record). A node's
-  hash is H(0x01 ‖ h₁ ‖ … ‖ hₙ) over its entries. In the EMB-tree a node's hash is
-  instead the root of a small Merkle tree with fanout f_k over its entries (Section 3.3),
-  padded with empty slots (assumption 1).
-- **Read proof.** For each node on the path, bottom-up, the hashes to the left and
-  to the right of the path entry: `[(left_hashes, right_hashes), ...]`. In the
-  EMB-tree there is one such step per level of each node's small tree, each with
-  exactly f_k − 1 hashes.
-- **Range proof (Section 3.2, Figure 4).** A copy of the tree in which everything the
-  client does not need is replaced by its hash. It shows the answer plus one boundary
-  record on each side (the largest key < low and the smallest key > high). Each node
-  is a list whose items are a hash (`bytes`), a record (`(key, value)`) or a shown
-  child (`list`); the nesting is the paper's node boundary information (footnote 1).
-  In the EMB-tree the groups of each small tree are nested in the same way, so one
-  verifier handles both trees.
-- **Range check (`verify_range`).** (1) The root recomputed from the proof equals the
-  trusted root; (2) no hash lies between two shown records; (3) the first shown record
-  is < low, or nothing comes before it in the tree; (4) the same for the last record
-  and high; (5) the answer is exactly the shown records inside [low, high].
-- **Missing keys.** `read(key)` of a missing key returns `(None, proof)`, where the
-  proof is the range proof for [key, key]: it shows the key's neighbours side by side,
-  so the client sees there is nothing between them.
-- **Insert.** `insert(key, value)` first builds that proof for the new key, then
-  inserts, and returns the proof; it verifies against the root from *before* the insert.
-- **Updates (Sections 4.2–4.3).** `update` re-hashes the record and only the path to
-  the root; in the EMB-tree, only one path through each small tree on the way.
+**Hashes.** A record's hash is H(0x00 ‖ record).
+- MB-tree: a node's hash is H(0x01 ‖ h₁ ‖ … ‖ hₙ), one hash over all its entries.
+- EMB-tree: a node's hash is the top of a small Merkle tree built over its entries,
+  f_k at a time. Unused places are filled with an empty value E (see assumption 1).
 
-### Missing keys: every case
+**Read proof.** For every node on the path from the leaf to the root, the server sends
+the hashes next to the path, as `[(left_hashes, right_hashes), ...]`, leaf first.
+- MB-tree: the hashes of all the other entries of the node (up to f − 1 per node).
+- EMB-tree: one step per level of the node's small tree, each with exactly f_k − 1 hashes.
 
-Where a missing key's neighbours sit decides how much of the tree its proof opens.
-Every case is tested on both trees (`TestNonMembership`, keys 10, 20, …, 160, fanout 4,
-f_k = 2: root [100]; inner nodes [40 | 70] and [130]; leaves [10 20 30] [40 50 60]
-[70 80 90] [100 110 120] [130 140 150 160]):
+**Range proof** (paper Figure 4). A copy of the tree in which everything the client does
+not need is replaced by its hash. It shows the answer plus **one boundary record on each
+side** (the largest key below `low` and the smallest key above `high`). Each node is a
+list of hashes (`bytes`), records (`(key, value)`) and opened children (`list`). In the
+EMB-tree the small-tree groups are nested the same way, so one checker works for both trees.
+
+`verify_range` checks five things:
+1. the root rebuilt from the proof equals the trusted root;
+2. no hidden hash lies between two shown records;
+3. the first shown record is below `low`, or nothing comes before it in the tree;
+4. the same for the last shown record and `high`;
+5. the answer is exactly the shown records inside [low, high].
+
+**Missing key.** `read(key)` returns `(None, proof)`, where the proof is the range proof
+for [key, key]. It shows the two neighbours of the key side by side, so the client sees
+there is nothing between them. Every place a missing key can fall is tested on both trees
+(`TestNonMembership`; keys 10, 20, …, 160; fanout 4, f_k = 2):
 
 | Where the key falls | Example | Records shown |
 |---|---|---|
@@ -114,62 +167,59 @@ f_k = 2: root [100]; inner nodes [40 | 70] and [130]; leaves [10 20 30] [40 50 6
 | between two leaves with different parents | `read(95)` | 90, 100 |
 | the tree is empty | `read(5)` | none |
 
-A key equal to a signpost in an inner node is never missing: without delete, every
-signpost is a copy of a real key.
+A key equal to a signpost is never missing: there is no delete, so every signpost is a
+copy of a real key.
 
-## Parameters
+**Insert.** `insert(key, value)` first builds the missing-key proof for the new key, then
+inserts, and returns that proof. It is checked against the root from *before* the insert.
 
-| Parameter | Meaning | Values used |
+**Update** (Sections 4.2–4.3). Only the record and the path up to the root are hashed
+again; in the EMB-tree, only one path through each small tree on the way.
+
+## Settings
+
+| Setting | Meaning | Values used |
 |---|---|---|
-| `fanout` | Maximum entries per node (records in a leaf, children in an inner node). MB-tree fanout = EMB-tree external fanout f_e. At least 3 | Toy example: 4. Benchmark: 8, 32, 128 |
-| `fk` | EMB-tree embedded fanout f_k. At least 2 | 2 (the paper's default, Section 6.2) |
-| Benchmark | 10,000 records inserted in random order, seed 42; 1,000 reads and 1,000 updates; 200 range reads of 50 records; 5 runs, median | Settings at the top of `benchmark.py` |
+| `fanout` | Most entries per node (records in a leaf, children in an inner node); the EMB-tree's f_e. At least 3 | 16-key example: 4. Benchmark: 8, 32, 128 |
+| `fk` | EMB-tree small-tree fanout f_k. At least 2 | 2 (the paper's default, Section 6.2) |
+| Benchmark | 10,000 records in random order (seed 42); 1,000 reads, 1,000 updates, 200 range reads of 50 records; median of 5 runs | At the top of `benchmark.py` |
 
-## Assumptions and deviations from the paper
+## Assumptions and differences from the paper
 
-1. **Non-full nodes in the EMB-tree** (as suggested by the task reviewer). The paper
+1. **Nodes that are not full (EMB-tree)**, as suggested by the task reviewer. The paper
    assumes full nodes. Here every node's small tree has a fixed number of slots: the
-   smallest power of f_k that holds f_e entries (4 in the toy example; 8, 32 and 128
-   in the benchmark). Unused slots hold EMPTY = 32 zero bytes, so every group is full
-   and a read proof has exactly f_k − 1 hashes per small-tree level, as in the paper's
-   cost model. A group of only empty slots is itself EMPTY (it is not hashed). The
-   client treats EMPTY as an empty slot, not as a hidden record; a server cannot use it
-   to hide a record, because the record's real hash is not EMPTY and the root would
-   change (tested). With f_k ≥ f_e there is no small tree: the node is hashed exactly
-   like an MB-tree node, so the two trees give the same hashes and proofs (tested), as
-   the paper states. The small tree holds hashes only; the search inside a node uses
-   the node's sorted keys.
-2. **EMB-tree inserts rebuild** the small trees of the nodes they change, because a
-   new entry shifts the later entries into other groups. `update` recomputes only the
-   paths (Section 4.3). EMB-tree inserts therefore cost more hashing than the paper's
-   cost model.
+   smallest power of f_k that holds f_e entries (4 in the 16-key example; 8, 32, 128 in
+   the benchmark). Unused slots hold **E = 32 zero bytes**, so every read proof has exactly
+   f_k − 1 hashes per small-tree level, as in the paper's cost model. A group of only E's
+   stays E. A server cannot use E to hide a record: the record's real hash is not E, so
+   the root would change (tested). With f_k ≥ f_e there is no small tree and the node is
+   hashed exactly like an MB-tree node, as the paper says (tested).
+2. **EMB-tree inserts rebuild** the small trees of the nodes they change, because a new
+   entry shifts the later entries into other groups. `update` changes only the paths.
+   So EMB-tree inserts cost more than the paper's cost model.
 3. **Hash labels.** Every hash input starts with 0x00 (record) or 0x01 (node), as in
-   RFC 6962 Section 2.1, so a node hash cannot be passed off as a record hash. Records
-   are encoded unambiguously: 4-byte length + the key as decimal text, then 4-byte
-   length + the UTF-8 value.
-4. **SHA-256** instead of the paper's SHA-1, and **no signature** on the root: the
-   client receives the trusted root directly (both as in the task README).
-5. **In memory.** The fanout is set directly instead of being derived from a disk page
-   size, and both trees use the same external fanout, so the only difference between
-   them is the small tree. (In the paper the EMB-tree's fanout is smaller because the
-   small trees take page space.)
-6. **Where hashes are stored.** The paper keeps each child's hash in the parent's entry
-   (k|p|h). Here each node keeps its own hash and the parent reads it through the
-   pointer: the same value, stored once.
-7. **Keys and values.** Keys are unique integers (also negative, up to the 4,300 digits
-   Python can write as text); values are text. Updating a missing key raises `KeyError`.
-8. **Splits.** An over-full node splits into two halves; with an odd count the left
-   half gets the extra entry (fanout 4: 5 → 3 + 2). A leaf split copies the first key
-   of the right half up; an inner split moves the middle key up.
-9. **Non-membership proofs** (as suggested by the task reviewer). A missing key's
-   `read` is proven, and every `insert` returns the proof that its key was not in the
-   tree. If the key exists there is no such proof, so the insert raises `KeyError` and
-   changes nothing.
-10. **Not implemented** (not required by the task): delete, batch updates (Section 4.2),
-    bulk loading, signatures, the ASB-tree and the EMB⁻/EMB* variants.
-11. **Benchmark definitions.** Insert time includes the non-membership proof each
-    insert builds. Read time = lookup only. Proof generation time = full `read()` /
-    `read_range()` minus the lookup. Proof size = number of hashes (and bytes, 32 each),
-    with the empty slots among them also counted separately; "total bytes" adds the
-    records sent (answer and boundary records). The nesting information is not counted
+   RFC 6962, so a node hash cannot pass as a record hash. A record is encoded as a 4-byte
+   length + the key as decimal text, then a 4-byte length + the UTF-8 value.
+4. **SHA-256** instead of the paper's SHA-1, and **no signature** on the root: the client
+   receives the trusted root directly (both as in the task README).
+5. **In memory.** The fanout is set directly, not from a disk page size, and both trees
+   use the same fanout, so the only difference between them is the small tree. (In the
+   paper the EMB-tree's fanout is smaller, because the small trees take page space.)
+6. **Where hashes are stored.** The paper keeps each child's hash in the parent's entry.
+   Here each node keeps its own hash and the parent reads it through the pointer: the same
+   value, stored once.
+7. **Keys and values.** Keys are unique integers (negative ones too); values are text.
+   Updating a missing key raises `KeyError`.
+8. **Splits.** A node with one entry too many splits into two halves; the left half gets
+   the extra entry (fanout 4: 5 → 3 + 2). A leaf split copies the first key of the right
+   half up; an inner-node split moves the middle key up.
+9. **Missing-key proofs**, as suggested by the task reviewer. A missing key's `read` is
+   proven, and every `insert` returns the proof that its key was new. If the key already
+   exists, `insert` raises `KeyError` and changes nothing.
+10. **Not implemented** (not required by the task): delete, batch updates, bulk loading,
+    signatures, the ASB-tree and the EMB⁻/EMB* variants.
+11. **Benchmark definitions.** Insert time includes the missing-key proof each insert
+    builds. Read time = lookup only. Proof generation time = full `read()` / `read_range()`
+    minus the lookup. Proof size = number of hashes (32 bytes each), with the E's among
+    them also counted; "total bytes" adds the records sent. The list nesting is not counted
     (the paper also leaves it out, Section 3.2).

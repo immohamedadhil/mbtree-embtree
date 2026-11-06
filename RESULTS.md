@@ -41,10 +41,14 @@ at least one test.
 Keys 1–16 inserted in order, fanout 4, EMB-tree f_k = 2 (4 slots per node). Tree:
 `[10]` / `[4 7] [13]` / `[1 2 3] [4 5 6] [7 8 9] [10 11 12] [13 14 15 16]`.
 
+The demo shows `read(14)` and `read_range(5, 9)` (the first two rows); the other rows
+are measured on the same tree.
+
 | Proof (number of hashes; E = empty slots among them) | MB-tree | EMB-tree |
 |---|---:|---:|
+| `read(14)` (in the demo) | 5 | 6 (2 E) |
+| `read_range(5, 9)` (+ boundary records 4 and 10; in the demo) | 4 | 9 (5 E) |
 | `read(2)` | 5 | 6 (1 E) |
-| `read(14)` | 5 | 6 (2 E) |
 | `read(99)` (proof that 99 is absent) | 5 | 6 (2 E) |
 | `read_range(1, 5)` (+ boundary record 6) | 2 | 5 (3 E) |
 | `read_range(9, 12)` (+ boundary records 8 and 13) | 6 | 9 (5 E) |
