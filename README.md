@@ -215,42 +215,17 @@ again; in the EMB-tree, only one path through each small tree on the way.
 | `fk` | EMB-tree small-tree fanout f_k. At least 2 | 2 (the paper's default, Section 6.2) |
 | Benchmark | 10,000 records in random order (seed 42); 1,000 reads, 1,000 updates, 200 range reads of 50 records; median of 5 runs | At the top of `benchmark.py` |
 
-## Assumptions and differences from the paper
+## Assumptions
 
-1. **Nodes that are not full (EMB-tree)**, as suggested by the task reviewer. The paper
-   assumes full nodes. Here every node's small tree has a fixed number of slots: the
-   smallest power of f_k that holds f_e entries (4 in the 16-key example; 8, 32, 128 in
-   the benchmark). Unused slots hold **E = 32 zero bytes**, so every read proof has exactly
-   f_k − 1 hashes per small-tree level, as in the paper's cost model. A group of only E's
-   stays E. A server cannot use E to hide a record: the record's real hash is not E, so
-   the root would change (tested). With f_k ≥ f_e there is no small tree and the node is
-   hashed exactly like an MB-tree node, as the paper says (tested).
-2. **EMB-tree inserts rebuild** the small trees of the nodes they change, because a new
-   entry shifts the later entries into other groups. `update` changes only the paths.
-   So EMB-tree inserts cost more than the paper's cost model.
-3. **Hash labels.** Every hash input starts with 0x00 (record) or 0x01 (node), as in
-   RFC 6962, so a node hash cannot pass as a record hash. A record is encoded as a 4-byte
-   length + the key as decimal text, then a 4-byte length + the UTF-8 value.
-4. **SHA-256** instead of the paper's SHA-1, and **no signature** on the root: the client
-   receives the trusted root directly (both as in the task README).
-5. **In memory.** The fanout is set directly, not from a disk page size, and both trees
-   use the same fanout, so the only difference between them is the small tree. (In the
-   paper the EMB-tree's fanout is smaller, because the small trees take page space.)
-6. **Where hashes are stored.** The paper keeps each child's hash in the parent's entry.
-   Here each node keeps its own hash and the parent reads it through the pointer: the same
-   value, stored once.
-7. **Keys and values.** Keys are unique integers (negative ones too); values are text.
-   Updating a missing key raises `KeyError`.
-8. **Splits.** A node with one entry too many splits into two halves; the left half gets
-   the extra entry (fanout 4: 5 → 3 + 2). A leaf split copies the first key of the right
-   half up; an inner-node split moves the middle key up.
-9. **Missing-key proofs**, as suggested by the task reviewer. A missing key's `read` is
-   proven, and every `insert` returns the proof that its key was new. If the key already
-   exists, `insert` raises `KeyError` and changes nothing.
-10. **Not implemented** (not required by the task): delete, batch updates, bulk loading,
-    signatures, the ASB-tree and the EMB⁻/EMB* variants.
-11. **Benchmark definitions.** Insert time includes the missing-key proof each insert
-    builds. Read time = lookup only. Proof generation time = full `read()` / `read_range()`
-    minus the lookup. Proof size = number of hashes (32 bytes each), with the E's among
-    them also counted; "total bytes" adds the records sent. The list nesting is not counted
-    (the paper also leaves it out, Section 3.2).
+1. **Nodes that are not full (EMB-tree):** empty places are filled with E (32 zero bytes),
+   as suggested by the reviewer.
+2. **EMB-tree inserts** rebuild the small trees of the changed nodes, so they are slower
+   than in the paper.
+3. **Hashes:** SHA-256 instead of SHA-1; records start with 0x00, nodes with 0x01.
+4. **No signature:** the client gets the trusted root directly (as the task allows).
+5. **In memory:** the fanout is set directly, the same for both trees.
+6. **Keys** are unique integers, and **values** are text.
+7. **Splits:** 5 entries become 3 + 2.
+8. **Missing keys are proven,** and every insert proves its key is new (suggested by the
+   reviewer).
+9. **Not implemented:** delete, batch updates, signatures, and other variants (not required).
