@@ -68,25 +68,56 @@ leaves   [1 2 3]  [4 5 6]  [7 8 9]  [10 11 12]  [13 14 15 16]
 7. **A cheating server:** five kinds of lies, each one caught
 8. **Same answers:** both trees always give the same answers; only the proofs differ
 
-## Results in short
+## Results
 
-| Read proof size (hashes) | MB-tree | EMB-tree |
+**Is it correct?** Yes. All 91 tests pass. Both trees always give the same answers.
+Every honest proof is accepted, and every lie we tried (changed value, changed proof,
+hidden record, false "not found") is caught.
+
+**How was it measured?** 10,000 records in random order, the same data for both trees
+(`python benchmark.py`).
+
+### Proof size: how many hashes the server sends with one read (fewer is better)
+
+| Node size (fanout) | MB-tree | EMB-tree |
+|---:|---:|---:|
+| 8 | 25 | 18 |
+| 32 | 64 | 15 |
+| 128 | 201 | 14 |
+
+The MB-tree proof grows as nodes get bigger. The EMB-tree proof stays small.
+(MB-tree numbers are averages over 1,000 reads, rounded; EMB-tree reads all have the same size.)
+
+### Speed at fanout 32: microseconds per operation (smaller is faster)
+
+| Operation | MB-tree | EMB-tree |
 |---|---:|---:|
-| 16-key example, fanout 4 | 5 | 6 |
-| 10,000 records, fanout 8 | 25 | 18 |
-| 10,000 records, fanout 32 | 64.3 | 15 |
-| 10,000 records, fanout 128 | 201.3 | 14 |
+| Insert | 59 | 492 |
+| Read: find the record | 2.5 | 2.7 |
+| Read: make the proof | 8 | 26 |
+| Read: check the proof (client) | 56 | 104 |
+| Update | 36 | 90 |
 
-The 16-key row is the single read(14). The rows with 10,000 records are averages over
-1,000 reads: MB-tree nodes are not all equally full, so its proof size varies from read
-to read; the EMB-tree's padded small trees give every read the same proof size.
+Fanouts 8 and 128 show the same pattern. One exception: at fanout 128 the EMB-tree
+checks read proofs faster (79 vs 120). Finding a record runs the same code in both
+trees, so the small differences there are just noise.
 
-- The MB-tree proof grows with the fanout; the EMB-tree proof stays small.
-- The price: EMB-tree inserts are slower (3.4× at fanout 8, 8.3× at 32, 13× at 128),
-  because they rebuild the small trees of the changed nodes.
-- In very small nodes (the 16-key example) the EMB-tree has no advantage.
+### In one sentence
 
-Full numbers and discussion: [RESULTS.md](RESULTS.md) and
+**The EMB-tree sends much smaller proofs, but it is slower to insert and update; the
+MB-tree is faster, but its proofs grow with the node size.**
+
+### Limitations
+
+- Times change between runs on a laptop (up to about 2×); proof sizes are exact.
+- Python and in memory, so the times can't be compared with the paper's.
+- EMB-tree inserts rebuild the small trees inside the changed nodes, so they are slower
+  than in the paper.
+- With small nodes (fanout 4 and 8) the EMB-tree is not better; for range reads at
+  fanout 8 its proof is even bigger, because of the empty slots.
+- No delete and no signatures (not required by the task).
+
+All the numbers (every fanout, range reads, bytes): [RESULTS.md](RESULTS.md) and
 [benchmark_results.md](benchmark_results.md).
 
 ## Files
