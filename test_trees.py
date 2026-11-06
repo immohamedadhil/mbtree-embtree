@@ -118,7 +118,7 @@ class TestBPlusTree(unittest.TestCase):
         return tree
 
     def test_toy16_shape(self):
-        """Keys 1-16 in ascending order, fanout 4: the same tree as in our study notes."""
+        """Keys 1-16 in ascending order, fanout 4: the same tree as in my study notes."""
         tree = self.build(TOY16.items())
         self.assertEqual(tree.levels(), [
             [[10]],

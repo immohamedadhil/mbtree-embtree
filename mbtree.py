@@ -139,7 +139,7 @@ class MBTree:
         i = bisect_left(leaf.keys, key)
         if i > 0:
             return leaf.keys[i - 1]
-        # Everything in this leaf is >= key: go up until we can step one child
+        # Everything in this leaf is >= key: go up until I can step one child
         # to the left, then down that subtree's right edge to its last key.
         for node, j in reversed(path):
             if j > 0:

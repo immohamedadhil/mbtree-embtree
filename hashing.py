@@ -4,7 +4,7 @@ Paper (Section 3.2):  leaf entry  h = H(r)            (r = the record)
                       index entry h = H(h_1|...|h_f)  (the child's entry hashes, joined)
 
 Assumption A2 (not in the paper): a one-byte label goes in front of everything
-we hash, as in RFC 6962 Section 2.1:  0x00 for a record, 0x01 for a node.
+I hash, as in RFC 6962 Section 2.1:  0x00 for a record, 0x01 for a node.
 So a node hash can never be passed off as a record hash, or the other way round.
 """
 import hashlib

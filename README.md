@@ -71,7 +71,7 @@ leaves   [1 2 3]  [4 5 6]  [7 8 9]  [10 11 12]  [13 14 15 16]
 ## Results
 
 **Is it correct?** Yes. All 91 tests pass. Both trees always give the same answers.
-Every honest proof is accepted, and every lie we tried (changed value, changed proof,
+Every honest proof is accepted, and every lie I tried (changed value, changed proof,
 hidden record, false "not found") is caught.
 
 **How was it measured?** 10,000 records in random order, the same data for both trees

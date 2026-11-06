@@ -3,7 +3,7 @@
 ## Summary
 
 - **Correctness.** Both trees give identical answers on the same operations, every
-  honest proof verifies, and every tampered answer or proof that we tried is rejected
+  honest proof verifies, and every tampered answer or proof that I tried is rejected
   (91 unit tests and the toy demo). Every insert comes with a proof that its key was
   new, and every kind of missing key is proven (README, "Missing keys: every case").
 - **Proof size.** The EMB-tree's read proofs are much smaller, and the gap grows with
@@ -32,7 +32,7 @@
 | Both trees agree on the same 1,500 random inserts, updates, reads and range reads (4 fanout settings) | 1 |
 | **Total** (all pass on Python 3.12 and 3.14) | **91** |
 
-We also checked the tests themselves: 21 deliberately broken versions of the code (one
+I also checked the tests themselves: 21 deliberately broken versions of the code (one
 small bug each, in the trees, the verifier and the record encoding) were each caught by
 at least one test.
 
@@ -91,12 +91,12 @@ median of 5 runs. Python 3.14, Windows 11 laptop.
 - **Proof size matches the paper.** The paper assumes "that f_e is a power of f_k such
   that the embedded trees when bulk-loaded are always full", and then "the total number
   of values inserted in the VO per node is reduced to (f_k − 1)d_k" (Section 3.3). The
-  empty slots make our nodes full in the same way, so with f_k = 2 a read proof has
+  empty slots make my nodes full in the same way, so with f_k = 2 a read proof has
   exactly d_k hashes per node: 3 × 6 levels = 18 at fanout 8, 5 × 3 = 15 at fanout 32,
-  7 × 2 = 14 at fanout 128, which is what we measured. The MB-tree's proofs grow with
+  7 × 2 = 14 at fanout 128, which is what I measured. The MB-tree's proofs grow with
   the fanout (about f − 1 hashes per level). The paper: "For f_k = 2 the authentication
   cost becomes equal to a Merkle hash tree, which has the minimal VO size but higher
-  verification time" (Section 3.3). Without the empty slots our EMB read proofs would
+  verification time" (Section 3.3). Without the empty slots my EMB read proofs would
   hold 14.1, 14.2 and 13.6 hashes, close to log₂ 10,000 ≈ 13.3.
 - **Range proofs at small fanouts.** Every leaf inside a range is sent in full, with
   its empty slots. At fanout 8 a 52-record range covers about 10 leaves holding 5.7
@@ -113,7 +113,7 @@ median of 5 runs. Python 3.14, Windows 11 laptop.
 - **Inserts.** The paper also finds that "the EMB-tree approaches increase the number
   of hashes that need to be computed", but that the extra time is small next to the
   total construction cost, where disk I/O dominates (Section 6.2.1). In memory there
-  is no I/O to hide it, and our inserts rebuild the changed small trees, so the gap
+  is no I/O to hide it, and my inserts rebuild the changed small trees, so the gap
   here (about 3–13×) is larger than the paper's.
 - **Updates** re-hash only the path in both trees (Sections 4.2–4.3, checked by tests
   that count hash calls). The EMB-tree makes more but smaller hash calls; it is slower
@@ -133,7 +133,7 @@ median of 5 runs. Python 3.14, Windows 11 laptop.
   inflates the EMB-tree's insert time compared with the paper's cost model. Inserts in
   both trees also include building the non-membership proof.
 - **Empty slots are counted as full 32-byte hashes.** The client knows what EMPTY is,
-  so a real wire format could send each one as a short marker; we count them in full,
+  so a real wire format could send each one as a short marker; I count them in full,
   and also report them separately.
 - **Same fanout for both trees.** In the paper the EMB-tree's fanout is smaller
   because its small trees use page space; here both fanouts are set directly.

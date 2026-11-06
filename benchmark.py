@@ -15,7 +15,7 @@ verification time, and proof size.
   them are empty slots (EMPTY, EMB-tree only), and the total bytes sent = hash
   bytes + the records (answer and boundary records).
   Not counted: the nesting/position information (the paper also leaves it
-  out, Section 3.2) and a signature (we do not sign the root).
+  out, Section 3.2) and a signature (I do not sign the root).
 """
 import gc
 import platform
